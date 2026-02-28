@@ -52,13 +52,76 @@ workspace-sync-darwin-arm64 -r -d /Users/h1code2/48264/openclaw-workspace -p 170
 workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --peer 100.126.242.74:17077 --token "h1code2"
 ```
 
-参数含义：
-- `-r` / `-s`：receive / send
-- `-d`：目录（`--dir`）
-- `-p`：端口或监听地址（`--listen`，支持 `17077` 或 `:17077`）
-- `-t` / `--token`：共享密钥
-- `--peer`：发送目标（`ip[:port]`）
-  - 只写 IP 时，会按 `-p` 自动补端口
+---
+
+## 所有参数说明（完整）
+
+### 模式与目标
+
+- `--mode send|receive|both`
+  - 运行模式。默认：`send`
+- `-r`
+  - `--mode=receive` 的快捷方式
+- `-s`
+  - `--mode=send` 的快捷方式
+- `--peer <host[:port]>`
+  - 发送目标地址（`send/both` 必填）
+  - 若只写主机（不带端口），会自动使用 `--listen/-p` 的端口补齐
+
+### 路径与监听
+
+- `--dir <path>` / `-d <path>`
+  - 同步目录
+- `--listen <addr>` / `-l <addr>` / `-p <addr-or-port>`
+  - 接收监听地址，默认 `:7070`
+  - 支持 `17077`（会自动变成 `:17077`）或 `:17077` 或 `0.0.0.0:17077`
+
+### 鉴权与同步节奏
+
+- `--token <string>` / `-t <string>`
+  - 共享密钥（必填）
+- `--debounce <duration>`
+  - 文件事件去抖，默认 `400ms`
+  - 示例：`200ms` / `1s`
+- `--resync <duration>`
+  - 周期性全量重同步（发送端生效）
+  - 默认 `60s`，设 `0` 关闭
+
+### 过滤规则
+
+- `--exclude <glob>`（可重复）
+  - 排除规则，可多次传入
+  - 默认排除：`.git/*`, `node_modules/*`, `.DS_Store`
+
+### 后台管理
+
+- 子命令：`start | status | stop`
+  - `start`：按当前参数后台启动
+  - `status`：查看 PID 是否在运行
+  - `stop`：停止后台进程
+- `--pid-file <path>`
+  - PID 文件路径
+  - 默认：
+    - Linux：`~/.cache/workspace-sync/workspace-sync.pid`
+    - macOS：`~/Library/Caches/workspace-sync/workspace-sync.pid`
+
+### 日志相关
+
+- `--log-file <path>`
+  - 后台日志文件路径
+  - 默认：
+    - Linux：`~/.cache/workspace-sync/workspace-sync.log`
+    - macOS：`~/Library/Caches/workspace-sync/workspace-sync.log`
+- `--log-max-bytes <n>`
+  - 日志最大保留字节数，默认 `10485760`（10MB）
+  - 超过后自动裁剪（保留最新日志）
+- 环境变量：`WORKSPACE_SYNC_LOG_MAX_BYTES`
+  - 可覆盖默认日志上限（10MB）
+
+### 内部参数（无需手动设置）
+
+- `--background-child`
+  - 仅内部后台拉起时使用，正常不用传
 
 ---
 
@@ -78,26 +141,7 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
 
 ---
 
-## 长参数兼容
-
-- `--mode send|receive|both`
-- `--dir /path`（短：`-d`）
-- `--listen :7070`（短：`-p` 或 `-l`）
-- `--peer host[:port]`
-- `--token xxx`（短：`-t`）
-- `--debounce 400ms`
-- `--resync 60s`（0 禁用）
-- `--exclude <pattern>`（可重复）
-- `--pid-file /path/to.pid`
-
-默认排除：
-- `.git/*`
-- `node_modules/*`
-- `.DS_Store`
-
----
-
-## 后台运行
+## 后台运行示例
 
 ```bash
 workspace-sync -s -d /data/ws -p 17077 --peer 100.x.x.x --token "xxx" start
@@ -105,20 +149,7 @@ workspace-sync status
 workspace-sync stop
 ```
 
-默认 PID 文件：
-- Linux: `~/.cache/workspace-sync/workspace-sync.pid`
-- macOS: `~/Library/Caches/workspace-sync/workspace-sync.pid`
-
-后台日志文件：
-- Linux: `~/.cache/workspace-sync/workspace-sync.log`
-- macOS: `~/Library/Caches/workspace-sync/workspace-sync.log`
-
-日志大小控制：
-- 默认最大 `10MB`
-- 可用 `--log-max-bytes` 调整
-- 也可通过环境变量 `WORKSPACE_SYNC_LOG_MAX_BYTES` 覆盖默认值
-
-可用下面命令查看后台日志：
+查看后台日志：
 
 ```bash
 tail -f ~/.cache/workspace-sync/workspace-sync.log
