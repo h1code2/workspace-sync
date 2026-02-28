@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -124,12 +125,42 @@ func startBackground(pidFile string, childArgs []string) error {
 	return nil
 }
 
+func normalizeListen(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ":7070"
+	}
+	if strings.HasPrefix(v, ":") {
+		return v
+	}
+	if _, _, err := net.SplitHostPort(v); err == nil {
+		return v
+	}
+	return ":" + v
+}
+
+func normalizePeer(peer, listen string) string {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(peer); err == nil {
+		return peer
+	}
+	listen = normalizeListen(listen)
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return peer
+	}
+	return net.JoinHostPort(peer, port)
+}
+
 func buildRunArgs(mode, dir, listen, peer, token string, debounce time.Duration, excludes []string, pidFile string) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
-		"--listen=" + listen,
-		"--peer=" + peer,
+		"--listen=" + normalizeListen(listen),
+		"--peer=" + normalizePeer(peer, listen),
 		"--token=" + token,
 		"--debounce=" + debounce.String(),
 		"--pid-file=" + pidFile,
@@ -149,8 +180,11 @@ func main() {
 	var debounce time.Duration
 	var excludes multiFlag
 	var pidFile string
+	var shortP multiFlag
+	var shortReceive bool
+	var shortSend bool
 
-	flag.StringVar(&mode, "mode", "send", "send | receive | both")
+	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
 	flag.StringVar(&listen, "listen", ":7070", "Listen addr for receive mode")
 	flag.StringVar(&peer, "peer", "", "Peer addr host:port for send mode")
@@ -158,7 +192,35 @@ func main() {
 	flag.DurationVar(&debounce, "debounce", 400*time.Millisecond, "Debounce window for fs events")
 	flag.Var(&excludes, "exclude", "Relative glob to exclude (repeatable)")
 	flag.StringVar(&pidFile, "pid-file", defaultPidFile(), "PID file path for start/status/stop")
+
+	// Short mode flags (requested UX)
+	flag.BoolVar(&shortReceive, "r", false, "short for --mode=receive")
+	flag.BoolVar(&shortSend, "s", false, "short for --mode=send")
+	// -p can be repeated: first is dir path, second is listen port/address
+	flag.Var(&shortP, "p", "short combined arg (1st: dir path, 2nd: listen addr/port)")
+
 	flag.Parse()
+
+	if shortReceive && shortSend {
+		log.Fatal("-r and -s cannot be used together")
+	}
+	if shortReceive {
+		mode = "receive"
+	}
+	if shortSend {
+		mode = "send"
+	}
+	if mode == "" {
+		mode = "send"
+	}
+	if len(shortP) >= 1 && strings.TrimSpace(shortP[0]) != "" {
+		dir = strings.TrimSpace(shortP[0])
+	}
+	if len(shortP) >= 2 && strings.TrimSpace(shortP[1]) != "" {
+		listen = strings.TrimSpace(shortP[1])
+	}
+	listen = normalizeListen(listen)
+	peer = normalizePeer(peer, listen)
 
 	if flag.NArg() > 0 {
 		sub := strings.ToLower(strings.TrimSpace(flag.Arg(0)))
