@@ -18,6 +18,11 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+func logf(format string, args ...any) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	fmt.Printf("[%s] %s", ts, fmt.Sprintf(format, args...))
+}
+
 type snapshotState struct {
 	seen      map[string]struct{}
 	startedAt time.Time
@@ -82,7 +87,7 @@ func (a *App) runReceiver(ctx context.Context) error {
 		_ = ln.Close()
 	}()
 
-	fmt.Printf("receiver listening %s\n", a.cfg.Listen)
+	logf("receiver listening %s\n", a.cfg.Listen)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -98,7 +103,7 @@ func (a *App) runReceiver(ctx context.Context) error {
 func (a *App) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	if err := serverAuth(conn, a.cfg.Token); err != nil {
-		fmt.Printf("auth failed from %s: %v\n", conn.RemoteAddr(), err)
+		logf("auth failed from %s: %v\n", conn.RemoteAddr(), err)
 		return
 	}
 	br := bufio.NewReader(conn)
@@ -111,17 +116,17 @@ func (a *App) handleConn(ctx context.Context, conn net.Conn) {
 		packet, err := readFrame(br)
 		if err != nil {
 			if err != io.EOF {
-				fmt.Printf("read frame error: %v\n", err)
+				logf("read frame error: %v\n", err)
 			}
 			return
 		}
 		evt, err := decrypt(a.cfg.Token, packet)
 		if err != nil {
-			fmt.Printf("decrypt frame error: %v\n", err)
+			logf("decrypt frame error: %v\n", err)
 			continue
 		}
 		if err := a.applyEvent(evt); err != nil {
-			fmt.Printf("apply event error: %v\n", err)
+			logf("apply event error: %v\n", err)
 		}
 	}
 }
@@ -133,7 +138,7 @@ func (a *App) applyEvent(evt fileEvent) error {
 			return fmt.Errorf("snapshot_begin without snapshot id")
 		}
 		a.snapshotBegin(evt.Snapshot)
-		fmt.Printf("<- snapshot begin %s\n", evt.Snapshot)
+		logf("<- snapshot begin %s\n", evt.Snapshot)
 		return nil
 	case "snapshot_end":
 		if evt.Snapshot == "" {
@@ -142,7 +147,7 @@ func (a *App) applyEvent(evt fileEvent) error {
 		if err := a.snapshotEnd(evt.Snapshot); err != nil {
 			return err
 		}
-		fmt.Printf("<- snapshot end %s\n", evt.Snapshot)
+		logf("<- snapshot end %s\n", evt.Snapshot)
 		return nil
 	}
 
@@ -165,7 +170,7 @@ func (a *App) applyEvent(evt fileEvent) error {
 			return err
 		}
 		a.suppress(rel, 1200*time.Millisecond)
-		fmt.Printf("<- delete %s\n", rel)
+		logf("<- delete %s\n", rel)
 		return nil
 	case "upsert":
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -184,7 +189,7 @@ func (a *App) applyEvent(evt fileEvent) error {
 		}
 		a.suppress(rel, 1200*time.Millisecond)
 		a.snapshotMarkSeen(evt.Snapshot, slashRel)
-		fmt.Printf("<- upsert %s (%dB)\n", rel, len(evt.Data))
+		logf("<- upsert %s (%dB)\n", rel, len(evt.Data))
 		return nil
 	default:
 		return fmt.Errorf("unknown event type: %s", evt.Type)
@@ -286,14 +291,14 @@ func (a *App) snapshotEnd(id string) error {
 		}
 		a.suppress(rel, 1200*time.Millisecond)
 		removedFiles++
-		fmt.Printf("<- snapshot prune %s\n", rel)
+		logf("<- snapshot prune %s\n", rel)
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	prunedDirs := a.pruneEmptyDirs()
-	fmt.Printf("snapshot reconcile done id=%s removed_files=%d removed_dirs=%d age=%s\n", id, removedFiles, prunedDirs, time.Since(st.startedAt).Round(time.Second))
+	logf("snapshot reconcile done id=%s removed_files=%d removed_dirs=%d age=%s\n", id, removedFiles, prunedDirs, time.Since(st.startedAt).Round(time.Second))
 	return nil
 }
 
@@ -341,7 +346,7 @@ func (a *App) runSender(ctx context.Context) error {
 	if err := a.addWatchRecursive(watcher, a.cfg.Dir); err != nil {
 		return err
 	}
-	fmt.Printf("watching %s\n", a.cfg.Dir)
+	logf("watching %s\n", a.cfg.Dir)
 
 	if err := a.initialSync(ctx); err != nil {
 		return fmt.Errorf("initial sync failed: %w", err)
@@ -357,7 +362,7 @@ func (a *App) runSender(ctx context.Context) error {
 		resyncTicker = time.NewTicker(a.cfg.ResyncInterval)
 		resyncCh = resyncTicker.C
 		defer resyncTicker.Stop()
-		fmt.Printf("periodic resync enabled interval=%s\n", a.cfg.ResyncInterval)
+		logf("periodic resync enabled interval=%s\n", a.cfg.ResyncInterval)
 	}
 
 	for {
@@ -385,7 +390,7 @@ func (a *App) runSender(ctx context.Context) error {
 			q[rel] = pendingEvent{op: ev.Op, when: time.Now()}
 		case err := <-watcher.Errors:
 			if err != nil {
-				fmt.Printf("watcher error: %v\n", err)
+				logf("watcher error: %v\n", err)
 			}
 		case <-tick.C:
 			now := time.Now()
@@ -394,15 +399,15 @@ func (a *App) runSender(ctx context.Context) error {
 					continue
 				}
 				if err := a.sendOne(ctx, rel, item.op); err != nil {
-					fmt.Printf("send error (%s): %v\n", rel, err)
+					logf("send error (%s): %v\n", rel, err)
 				}
 				delete(q, rel)
 			}
 		case <-resyncCh:
 			if err := a.initialSync(ctx); err != nil {
-				fmt.Printf("periodic resync failed: %v\n", err)
+				logf("periodic resync failed: %v\n", err)
 			} else {
-				fmt.Printf("periodic resync done\n")
+				logf("periodic resync done\n")
 			}
 		}
 	}
@@ -495,7 +500,7 @@ func (a *App) sendEvent(ctx context.Context, evt fileEvent) error {
 	if err := writeFrame(conn, packet); err != nil {
 		return err
 	}
-	fmt.Printf("-> %s %s\n", evt.Type, evt.Path)
+	logf("-> %s %s\n", evt.Type, evt.Path)
 	return nil
 }
 
@@ -577,7 +582,7 @@ func (a *App) initialSync(ctx context.Context) error {
 	if err := send(fileEvent{Type: "snapshot_end", Snapshot: snapID}); err != nil {
 		return err
 	}
-	fmt.Printf("initial snapshot sent id=%s files=%d\n", snapID, count)
+	logf("initial snapshot sent id=%s files=%d\n", snapID, count)
 	return nil
 }
 

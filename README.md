@@ -123,6 +123,7 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
 - `--log-max-bytes <n>`
   - 日志最大保留字节数，默认 `10485760`（10MB）
   - 超过后自动裁剪（保留最新日志）
+  - 日志行会带时间前缀（格式：`YYYY-MM-DD HH:MM:SS`）
 - 环境变量：`WORKSPACE_SYNC_LOG_MAX_BYTES`
   - 可覆盖默认日志上限（10MB）
 
