@@ -173,7 +173,32 @@ tail -f ~/.cache/workspace-sync/workspace-sync.log
 
 ---
 
-## 一键构建（多架构）
+## GitHub Actions 自动发布 Release
+
+仓库内已提供工作流：
+
+- `.github/workflows/release.yml`
+
+功能：
+- 自动构建三平台二进制：
+  - linux-amd64
+  - darwin-arm64
+  - windows-amd64.exe
+- 自动生成 `SHA256SUMS`
+- 自动上传到 GitHub Release
+
+触发方式：
+1. **推送 tag**（推荐）
+   - tag 规则：`v*`（如 `v1.0.0`）
+2. **手动触发**（workflow_dispatch）
+   - 在 Actions 页面输入 tag（如 `v1.0.1`）
+
+示例（本地触发发布）：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
 
 项目内脚本：
 
