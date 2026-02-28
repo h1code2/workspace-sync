@@ -147,8 +147,15 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
 
 ## 后台运行示例
 
+支持两种写法：
+
 ```bash
+# 写法 A（推荐）：参数在前，子命令在最后
 workspace-sync -s -d /data/ws -p 17077 --peer 100.x.x.x --token "xxx" start
+
+# 写法 B：子命令在前，参数在后（已支持）
+workspace-sync start -s -d /data/ws -p 17077 --peer 100.x.x.x --token "xxx"
+
 workspace-sync status
 workspace-sync stop
 ```
@@ -172,5 +179,6 @@ tail -f ~/.cache/workspace-sync/workspace-sync.log
 会产出：
 - `dist/workspace-sync-linux-amd64`
 - `dist/workspace-sync-darwin-arm64`
+- `dist/workspace-sync-windows-amd64.exe`
 
 构建参数包含 `-trimpath`。

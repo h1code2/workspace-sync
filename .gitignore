@@ -1,6 +1,7 @@
-# Binaries
-workspace-sync
-workspace-sync-*
+# Root-level local binaries
+/workspace-sync
+/workspace-sync.exe
+/workspace-sync-*
 
 # Build outputs
 dist/

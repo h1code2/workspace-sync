@@ -254,7 +254,25 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.D
 	return args
 }
 
+func reorderArgsForSubcommand(args []string) []string {
+	if len(args) < 2 {
+		return args
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[1]))
+	switch sub {
+	case "start", "status", "stop":
+		out := make([]string, 0, len(args))
+		out = append(out, args[0])
+		out = append(out, args[2:]...)
+		out = append(out, sub)
+		return out
+	default:
+		return args
+	}
+}
+
 func main() {
+	os.Args = reorderArgsForSubcommand(os.Args)
 	var mode string
 	var dir string
 	var listen string
