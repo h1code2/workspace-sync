@@ -113,6 +113,11 @@ workspace-sync stop
 - Linux: `~/.cache/workspace-sync/workspace-sync.log`
 - macOS: `~/Library/Caches/workspace-sync/workspace-sync.log`
 
+日志大小控制：
+- 默认最大 `10MB`
+- 可用 `--log-max-bytes` 调整
+- 也可通过环境变量 `WORKSPACE_SYNC_LOG_MAX_BYTES` 覆盖默认值
+
 可用下面命令查看后台日志：
 
 ```bash

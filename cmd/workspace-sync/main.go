@@ -4,12 +4,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +41,60 @@ func defaultLogFile() string {
 		baseDir = os.TempDir()
 	}
 	return filepath.Join(baseDir, "workspace-sync", "workspace-sync.log")
+}
+
+func defaultLogMaxBytes() int64 {
+	if v := strings.TrimSpace(os.Getenv("WORKSPACE_SYNC_LOG_MAX_BYTES")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10 * 1024 * 1024 // 10MB
+}
+
+func trimLogFile(path string, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return nil
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if st.Size() <= maxBytes {
+		return nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	start := st.Size() - maxBytes
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, maxBytes)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && err != io.EOF {
+		return err
+	}
+
+	wf, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer wf.Close()
+
+	if n <= 0 {
+		return nil
+	}
+	_, err = wf.Write(buf[:n])
+	return err
 }
 
 func isProcessRunning(pid int) bool {
@@ -113,20 +169,26 @@ func isProcessRunningFromPIDFile(pidFile string) bool {
 	return isProcessRunning(pid)
 }
 
-func startBackground(pidFile string, childArgs []string) error {
+func startBackground(pidFile, logFile string, logMaxBytes int64, childArgs []string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	logFile := defaultLogFile()
 	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
 		return err
 	}
+	_ = trimLogFile(logFile, logMaxBytes)
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, childArgs...)
+	args := append([]string{}, childArgs...)
+	args = append(args,
+		"--log-file="+logFile,
+		"--log-max-bytes="+strconv.FormatInt(logMaxBytes, 10),
+		"--background-child=true",
+	)
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = f
 	cmd.Stderr = f
 	cmd.Stdin = nil
@@ -141,7 +203,7 @@ func startBackground(pidFile string, childArgs []string) error {
 	_ = f.Close()
 	fmt.Printf("workspace-sync started in background, pid=%d\n", cmd.Process.Pid)
 	fmt.Printf("pid file: %s\n", pidFile)
-	fmt.Printf("log file: %s\n", logFile)
+	fmt.Printf("log file: %s (max %d bytes)\n", logFile, logMaxBytes)
 	return nil
 }
 
@@ -202,8 +264,11 @@ func main() {
 	var resync time.Duration
 	var excludes multiFlag
 	var pidFile string
+	var logFile string
+	var logMaxBytes int64
 	var shortReceive bool
 	var shortSend bool
+	var backgroundChild bool
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
@@ -217,6 +282,9 @@ func main() {
 	flag.DurationVar(&resync, "resync", 60*time.Second, "Periodic full resync interval (0 to disable)")
 	flag.Var(&excludes, "exclude", "Relative glob to exclude (repeatable)")
 	flag.StringVar(&pidFile, "pid-file", defaultPidFile(), "PID file path for start/status/stop")
+	flag.StringVar(&logFile, "log-file", defaultLogFile(), "Log file path for background mode")
+	flag.Int64Var(&logMaxBytes, "log-max-bytes", defaultLogMaxBytes(), "Max log file size in bytes")
+	flag.BoolVar(&backgroundChild, "background-child", false, "internal: run as detached background child")
 
 	// Short mode flags (requested UX)
 	flag.BoolVar(&shortReceive, "r", false, "short for --mode=receive")
@@ -239,6 +307,29 @@ func main() {
 	}
 	listen = normalizeListen(listen)
 	peer = normalizePeer(peer, listen)
+	if logMaxBytes <= 0 {
+		log.Fatal("--log-max-bytes must be > 0")
+	}
+	if strings.TrimSpace(logFile) == "" {
+		logFile = defaultLogFile()
+	}
+	_ = trimLogFile(logFile, logMaxBytes)
+	if backgroundChild {
+		lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			defer lf.Close()
+			os.Stdout = lf
+			os.Stderr = lf
+			log.SetOutput(lf)
+		}
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				_ = trimLogFile(logFile, logMaxBytes)
+			}
+		}()
+	}
 
 	if flag.NArg() > 0 {
 		sub := strings.ToLower(strings.TrimSpace(flag.Arg(0)))
@@ -252,7 +343,7 @@ func main() {
 				log.Fatal("--token is required")
 			}
 			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile)
-			if err := startBackground(pidFile, runArgs); err != nil {
+			if err := startBackground(pidFile, logFile, logMaxBytes, runArgs); err != nil {
 				log.Fatal(err)
 			}
 			return
