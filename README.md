@@ -2,43 +2,53 @@
 
 一个基于 Go 的轻量级实时文件同步工具。目标是把一个目录稳定地同步到另一台机器，并尽量保持两端文件一致。
 
-## 你要的短命令（已支持）
+## 你这次要的命令格式（已支持）
 
-### 接收端
-
-```bash
-workspace-sync -r -p /xxx/path -p :8088 --token "xxxx"
-```
-
-含义：
-- `-r` = receive
-- 第一个 `-p` = 本地目录路径（等价 `--dir`）
-- 第二个 `-p` = 监听地址/端口（等价 `--listen`）
-
-### 发送端
+### 接收端（mac）
 
 ```bash
-workspace-sync -s -p /xxx/path -p :8088 --peer "100.x.x.x" --token "xxxx"
+workspace-sync-darwin-arm64 -r -d /Users/h1code2/48264/openclaw-workspace -p 17077 --token "h1code2"
 ```
 
-含义：
-- `-s` = send
-- 第一个 `-p` = 本地目录路径（等价 `--dir`）
-- 第二个 `-p` = 本地端口配置（会用于补全 `--peer` 端口）
-- `--peer "100.x.x.x"` 会自动补全为 `100.x.x.x:8088`
+### 发送端（linux）
 
-> 也支持你直接写全：`--peer "100.x.x.x:8088"`
+```bash
+workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --peer 100.126.242.74:17077 --token "h1code2"
+```
+
+说明：
+- `-r` / `-s`：receive / send
+- `-d`：目录（`--dir`）
+- `-p`：端口或监听地址（`--listen`，支持 `17077` 或 `:17077`）
+- `--token`（也支持 `-t`）
+- `--peer`：发送端目标（`ip:port`，只写 ip 也会按 `-p` 自动补端口）
 
 ---
 
-## 兼容的长参数
+## 为什么“接收端手动删文件后不会自动恢复”？
+
+已修复：现在默认开启**周期性全量重同步**，会自动把接收端误删文件补回来。
+
+- 新参数：`--resync`（默认 `60s`）
+- 设为 `0` 可关闭周期重同步
+
+示例：每 20 秒收敛一次
+
+```bash
+workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --peer 100.126.242.74:17077 --token "h1code2" --resync 20s
+```
+
+---
+
+## 兼容长参数
 
 - `--mode send|receive|both`
 - `--dir /path`
 - `--listen :7070`
 - `--peer host[:port]`
-- `--token xxx`
+- `--token xxx` / `-t xxx`
 - `--debounce 400ms`
+- `--resync 60s`（0 禁用）
 - `--exclude <pattern>`（可重复）
 
 默认排除：`.git/*`, `node_modules/*`, `.DS_Store`
@@ -48,12 +58,7 @@ workspace-sync -s -p /xxx/path -p :8088 --peer "100.x.x.x" --token "xxxx"
 ## 后台运行
 
 ```bash
-# 后台启动（参数同上）
-workspace-sync -s -p /data/ws -p :8088 --peer 100.x.x.x --token "xxx" start
-
-# 查看状态
+workspace-sync -s -d /data/ws -p 17077 --peer 100.x.x.x --token "xxx" start
 workspace-sync status
-
-# 停止
 workspace-sync stop
 ```

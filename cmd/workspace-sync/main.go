@@ -155,7 +155,7 @@ func normalizePeer(peer, listen string) string {
 	return net.JoinHostPort(peer, port)
 }
 
-func buildRunArgs(mode, dir, listen, peer, token string, debounce time.Duration, excludes []string, pidFile string) []string {
+func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
@@ -163,6 +163,7 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce time.Duration,
 		"--peer=" + normalizePeer(peer, listen),
 		"--token=" + token,
 		"--debounce=" + debounce.String(),
+		"--resync=" + resync.String(),
 		"--pid-file=" + pidFile,
 	}
 	for _, ex := range excludes {
@@ -178,26 +179,29 @@ func main() {
 	var peer string
 	var token string
 	var debounce time.Duration
+	var resync time.Duration
 	var excludes multiFlag
 	var pidFile string
-	var shortP multiFlag
 	var shortReceive bool
 	var shortSend bool
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
+	flag.StringVar(&dir, "d", ".", "short for --dir")
 	flag.StringVar(&listen, "listen", ":7070", "Listen addr for receive mode")
+	flag.StringVar(&listen, "l", ":7070", "short for --listen")
 	flag.StringVar(&peer, "peer", "", "Peer addr host:port for send mode")
 	flag.StringVar(&token, "token", "", "Shared token")
+	flag.StringVar(&token, "t", "", "short for --token")
 	flag.DurationVar(&debounce, "debounce", 400*time.Millisecond, "Debounce window for fs events")
+	flag.DurationVar(&resync, "resync", 60*time.Second, "Periodic full resync interval (0 to disable)")
 	flag.Var(&excludes, "exclude", "Relative glob to exclude (repeatable)")
 	flag.StringVar(&pidFile, "pid-file", defaultPidFile(), "PID file path for start/status/stop")
 
 	// Short mode flags (requested UX)
 	flag.BoolVar(&shortReceive, "r", false, "short for --mode=receive")
 	flag.BoolVar(&shortSend, "s", false, "short for --mode=send")
-	// -p can be repeated: first is dir path, second is listen port/address
-	flag.Var(&shortP, "p", "short combined arg (1st: dir path, 2nd: listen addr/port)")
+	flag.StringVar(&listen, "p", ":7070", "short for --listen/port")
 
 	flag.Parse()
 
@@ -213,12 +217,6 @@ func main() {
 	if mode == "" {
 		mode = "send"
 	}
-	if len(shortP) >= 1 && strings.TrimSpace(shortP[0]) != "" {
-		dir = strings.TrimSpace(shortP[0])
-	}
-	if len(shortP) >= 2 && strings.TrimSpace(shortP[1]) != "" {
-		listen = strings.TrimSpace(shortP[1])
-	}
 	listen = normalizeListen(listen)
 	peer = normalizePeer(peer, listen)
 
@@ -233,7 +231,7 @@ func main() {
 			if token == "" {
 				log.Fatal("--token is required")
 			}
-			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, excludes, pidFile)
+			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile)
 			if err := startBackground(pidFile, runArgs); err != nil {
 				log.Fatal(err)
 			}
@@ -248,13 +246,14 @@ func main() {
 	}
 
 	cfg := syncer.Config{
-		Mode:     strings.TrimSpace(mode),
-		Dir:      strings.TrimSpace(dir),
-		Listen:   strings.TrimSpace(listen),
-		Peer:     strings.TrimSpace(peer),
-		Token:    token,
-		Debounce: debounce,
-		Excludes: excludes,
+		Mode:           strings.TrimSpace(mode),
+		Dir:            strings.TrimSpace(dir),
+		Listen:         strings.TrimSpace(listen),
+		Peer:           strings.TrimSpace(peer),
+		Token:          token,
+		Debounce:       debounce,
+		ResyncInterval: resync,
+		Excludes:       excludes,
 	}
 	if len(cfg.Excludes) == 0 {
 		cfg.Excludes = []string{".git/*", "node_modules/*", ".DS_Store"}

@@ -351,6 +351,15 @@ func (a *App) runSender(ctx context.Context) error {
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 
+	var resyncTicker *time.Ticker
+	var resyncCh <-chan time.Time
+	if a.cfg.ResyncInterval > 0 {
+		resyncTicker = time.NewTicker(a.cfg.ResyncInterval)
+		resyncCh = resyncTicker.C
+		defer resyncTicker.Stop()
+		fmt.Printf("periodic resync enabled interval=%s\n", a.cfg.ResyncInterval)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -388,6 +397,12 @@ func (a *App) runSender(ctx context.Context) error {
 					fmt.Printf("send error (%s): %v\n", rel, err)
 				}
 				delete(q, rel)
+			}
+		case <-resyncCh:
+			if err := a.initialSync(ctx); err != nil {
+				fmt.Printf("periodic resync failed: %v\n", err)
+			} else {
+				fmt.Printf("periodic resync done\n")
 			}
 		}
 	}
