@@ -96,6 +96,10 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
   - **建议配置端：发送端（-s）**
     - 发送端决定“哪些文件会被发出”，这是主控制点
   - 接收端也可配置同样规则作为二次保险，但不是主要控制面
+  - 规则说明：
+    - `--exclude ".git/*"` 会排除任意层级的 `.git` 目录内容
+    - `--exclude "node_modules/*"` 会排除任意层级 `node_modules`
+    - `--exclude "workspace-sync/dist/*"` 排除指定子路径
 
 ### 后台管理
 
