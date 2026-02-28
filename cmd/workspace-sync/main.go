@@ -33,6 +33,14 @@ func defaultPidFile() string {
 	return filepath.Join(baseDir, "workspace-sync", "workspace-sync.pid")
 }
 
+func defaultLogFile() string {
+	baseDir, err := os.UserCacheDir()
+	if err != nil || strings.TrimSpace(baseDir) == "" {
+		baseDir = os.TempDir()
+	}
+	return filepath.Join(baseDir, "workspace-sync", "workspace-sync.log")
+}
+
 func isProcessRunning(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -110,18 +118,30 @@ func startBackground(pidFile string, childArgs []string) error {
 	if err != nil {
 		return err
 	}
+	logFile := defaultLogFile()
+	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(exe, childArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = f
+	cmd.Stderr = f
 	cmd.Stdin = nil
 	if err := cmd.Start(); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if err := writePID(pidFile, cmd.Process.Pid); err != nil {
+		_ = f.Close()
 		return err
 	}
+	_ = f.Close()
 	fmt.Printf("workspace-sync started in background, pid=%d\n", cmd.Process.Pid)
 	fmt.Printf("pid file: %s\n", pidFile)
+	fmt.Printf("log file: %s\n", logFile)
 	return nil
 }
 

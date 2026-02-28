@@ -109,6 +109,16 @@ workspace-sync stop
 - Linux: `~/.cache/workspace-sync/workspace-sync.pid`
 - macOS: `~/Library/Caches/workspace-sync/workspace-sync.pid`
 
+后台日志文件：
+- Linux: `~/.cache/workspace-sync/workspace-sync.log`
+- macOS: `~/Library/Caches/workspace-sync/workspace-sync.log`
+
+可用下面命令查看后台日志：
+
+```bash
+tail -f ~/.cache/workspace-sync/workspace-sync.log
+```
+
 ---
 
 ## 一键构建（多架构）
