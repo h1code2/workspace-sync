@@ -1,0 +1,14 @@
+# Binaries
+workspace-sync
+workspace-sync-*
+
+# Build outputs
+dist/
+
+# Runtime files
+*.log
+*.pid
+
+# Go / editor / OS noise
+.DS_Store
+Thumbs.db
