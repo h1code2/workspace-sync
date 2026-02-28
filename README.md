@@ -60,12 +60,13 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
 
 - `--mode send|receive|both`
   - 运行模式。默认：`send`
+  - **发送端：`send`；接收端：`receive`**
 - `-r`
-  - `--mode=receive` 的快捷方式
+  - `--mode=receive` 的快捷方式（**接收端使用**）
 - `-s`
-  - `--mode=send` 的快捷方式
+  - `--mode=send` 的快捷方式（**发送端使用**）
 - `--peer <host[:port]>`
-  - 发送目标地址（`send/both` 必填）
+  - 发送目标地址（`send/both` 必填，**发送端使用**）
   - 若只写主机（不带端口），会自动使用 `--listen/-p` 的端口补齐
 
 ### 路径与监听
@@ -92,6 +93,9 @@ workspace-sync-linux-amd64 -s -d ~/.openclaw/workspace-developer/ -p 17077 --pee
 - `--exclude <glob>`（可重复）
   - 排除规则，可多次传入
   - 默认排除：`.git/*`, `node_modules/*`, `.DS_Store`
+  - **建议配置端：发送端（-s）**
+    - 发送端决定“哪些文件会被发出”，这是主控制点
+  - 接收端也可配置同样规则作为二次保险，但不是主要控制面
 
 ### 后台管理
 
