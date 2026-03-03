@@ -21,9 +21,16 @@ type wireMessage struct {
 }
 
 type fileEvent struct {
-	Type     string `json:"type"` // upsert | delete | snapshot_begin | snapshot_end | upsert_begin | upsert_chunk | upsert_end | mkdir | snapshot_keep
+	Type       string   `json:"type"` // hello|ack|upsert|delete|snapshot_begin|snapshot_end|upsert_begin|upsert_chunk|upsert_end|mkdir|snapshot_keep|move
+	EventID    string   `json:"event_id,omitempty"`
+	Protocol   int      `json:"protocol,omitempty"`
+	Caps       []string `json:"caps,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	ResumeFrom int64    `json:"resume_from,omitempty"`
+
 	Snapshot string `json:"snapshot,omitempty"`
 	Path     string `json:"path,omitempty"`
+	OldPath  string `json:"old_path,omitempty"`
 	Mode     uint32 `json:"mode,omitempty"`
 	ModTime  int64  `json:"mod_time,omitempty"`
 	Data     []byte `json:"data,omitempty"`
@@ -123,9 +130,17 @@ func decrypt(token string, packet []byte) (fileEvent, error) {
 		return fileEvent{}, err
 	}
 	switch evt.Type {
+	case "hello", "ack":
+		if evt.EventID == "" {
+			return fileEvent{}, errors.New("empty event id")
+		}
 	case "upsert", "delete", "mkdir", "upsert_begin", "upsert_chunk", "upsert_end", "snapshot_keep":
 		if evt.Path == "" {
 			return fileEvent{}, errors.New("empty path")
+		}
+	case "move":
+		if evt.Path == "" || evt.OldPath == "" {
+			return fileEvent{}, errors.New("empty move path")
 		}
 	case "snapshot_begin", "snapshot_end":
 		if evt.Snapshot == "" {

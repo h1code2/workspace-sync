@@ -8,14 +8,20 @@ import (
 )
 
 type Config struct {
-	Mode           string
-	Dir            string
-	Listen         string
-	Peer           string
-	Token          string
-	Debounce       time.Duration
-	ResyncInterval time.Duration
-	Excludes       []string
+	Mode            string
+	Dir             string
+	Listen          string
+	Peer            string
+	Token           string
+	Debounce        time.Duration
+	ResyncInterval  time.Duration
+	Excludes        []string
+	ChunkSize       int
+	AckTimeout      time.Duration
+	MaxRetries      int
+	SendWorkers     int
+	MetricsInterval time.Duration
+	EnableResume    bool
 }
 
 func (c Config) Validate() error {
@@ -49,6 +55,21 @@ func (c Config) Validate() error {
 	}
 	if c.ResyncInterval < 0 {
 		return fmt.Errorf("--resync must be >= 0")
+	}
+	if c.ChunkSize <= 0 {
+		return fmt.Errorf("--chunk-size must be > 0")
+	}
+	if c.AckTimeout <= 0 {
+		return fmt.Errorf("--ack-timeout must be > 0")
+	}
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("--max-retries must be >= 0")
+	}
+	if c.SendWorkers <= 0 {
+		return fmt.Errorf("--send-workers must be > 0")
+	}
+	if c.MetricsInterval <= 0 {
+		return fmt.Errorf("--metrics-interval must be > 0")
 	}
 	return nil
 }

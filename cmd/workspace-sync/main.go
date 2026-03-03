@@ -237,7 +237,7 @@ func normalizePeer(peer, listen string) string {
 	return net.JoinHostPort(peer, port)
 }
 
-func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string) []string {
+func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
@@ -247,6 +247,12 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.D
 		"--debounce=" + debounce.String(),
 		"--resync=" + resync.String(),
 		"--pid-file=" + pidFile,
+		"--chunk-size=" + strconv.Itoa(chunkSize),
+		"--ack-timeout=" + ackTimeout.String(),
+		"--max-retries=" + strconv.Itoa(maxRetries),
+		"--send-workers=" + strconv.Itoa(sendWorkers),
+		"--metrics-interval=" + metricsInterval.String(),
+		"--enable-resume=" + strconv.FormatBool(enableResume),
 	}
 	for _, ex := range excludes {
 		args = append(args, "--exclude="+ex)
@@ -287,6 +293,12 @@ func main() {
 	var shortReceive bool
 	var shortSend bool
 	var backgroundChild bool
+	var chunkSize int
+	var ackTimeout time.Duration
+	var maxRetries int
+	var sendWorkers int
+	var metricsInterval time.Duration
+	var enableResume bool
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
@@ -302,6 +314,12 @@ func main() {
 	flag.StringVar(&pidFile, "pid-file", defaultPidFile(), "PID file path for start/status/stop")
 	flag.StringVar(&logFile, "log-file", defaultLogFile(), "Log file path for background mode")
 	flag.Int64Var(&logMaxBytes, "log-max-bytes", defaultLogMaxBytes(), "Max log file size in bytes")
+	flag.IntVar(&chunkSize, "chunk-size", 1024*1024, "Chunk size in bytes for file transfer")
+	flag.DurationVar(&ackTimeout, "ack-timeout", 2*time.Second, "Timeout for waiting event ACK")
+	flag.IntVar(&maxRetries, "max-retries", 4, "Max retries for sending an event before failing")
+	flag.IntVar(&sendWorkers, "send-workers", 2, "Concurrent sender workers for file events")
+	flag.DurationVar(&metricsInterval, "metrics-interval", 30*time.Second, "Metrics log output interval")
+	flag.BoolVar(&enableResume, "enable-resume", true, "Enable resumable chunk transfer")
 	flag.BoolVar(&backgroundChild, "background-child", false, "internal: run as detached background child")
 
 	// Short mode flags (requested UX)
@@ -360,7 +378,7 @@ func main() {
 			if token == "" {
 				log.Fatal("--token is required")
 			}
-			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile)
+			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume)
 			if err := startBackground(pidFile, logFile, logMaxBytes, runArgs); err != nil {
 				log.Fatal(err)
 			}
@@ -375,14 +393,20 @@ func main() {
 	}
 
 	cfg := syncer.Config{
-		Mode:           strings.TrimSpace(mode),
-		Dir:            strings.TrimSpace(dir),
-		Listen:         strings.TrimSpace(listen),
-		Peer:           strings.TrimSpace(peer),
-		Token:          token,
-		Debounce:       debounce,
-		ResyncInterval: resync,
-		Excludes:       excludes,
+		Mode:            strings.TrimSpace(mode),
+		Dir:             strings.TrimSpace(dir),
+		Listen:          strings.TrimSpace(listen),
+		Peer:            strings.TrimSpace(peer),
+		Token:           token,
+		Debounce:        debounce,
+		ResyncInterval:  resync,
+		Excludes:        excludes,
+		ChunkSize:       chunkSize,
+		AckTimeout:      ackTimeout,
+		MaxRetries:      maxRetries,
+		SendWorkers:     sendWorkers,
+		MetricsInterval: metricsInterval,
+		EnableResume:    enableResume,
 	}
 	if len(cfg.Excludes) == 0 {
 		cfg.Excludes = []string{".git/*", "node_modules/*", ".DS_Store"}
