@@ -11,9 +11,9 @@
    - 接收端回 `ack`
    - 发送端支持超时、重试、失败计数
 
-2. ✅ **发送端协同 `.stop`**
-   - 发送端识别目录内 `.stop`，跳过该子树发送
-   - 接收端 `.stop` 继续生效（本地保护）
+2. ✅ **发送端协同 `.nosync`**
+   - 发送端识别目录内 `.nosync`，跳过该子树发送
+   - 接收端 `.nosync` 继续生效（本地保护）
 
 3. ✅ **大文件断点续传（resume）**
    - `upsert_begin` ACK 回传 `resume_from`
@@ -56,7 +56,7 @@
 - 周期重同步：`--resync`（默认 60s）
 - 传输协议：AES-GCM + gzip
 - 分块传输：`upsert_begin/chunk/end`
-- 本地保护：接收端 `.stop` 可冻结子树收敛
+- 本地保护：接收端 `.nosync` 可冻结子树收敛
 
 ---
 
@@ -88,12 +88,12 @@ workspace-sync-linux-amd64 -s -d /data/ws --peer 1.2.3.4:17077 --token "xxx" \
 
 ---
 
-## `.stop` 用法
+## `.nosync` 用法
 
-在接收端（或发送端）某目录下创建 `.stop`：
+在接收端（或发送端）某目录下创建 `.nosync`：
 
 ```bash
-touch some/dir/.stop
+touch some/dir/.nosync
 ```
 
 效果：
@@ -104,7 +104,7 @@ touch some/dir/.stop
 恢复：
 
 ```bash
-rm some/dir/.stop
+rm some/dir/.nosync
 ```
 
 ---

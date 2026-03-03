@@ -277,7 +277,7 @@ func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 	}
 	if stopRoot, stopped := a.findStopRoot(rel); stopped {
 		atomic.AddInt64(&a.metrics.skippedByStop, 1)
-		logf("<- skipped by .stop (%s): %s %s\n", stopRoot, evt.Type, rel)
+		logf("<- skipped by .nosync (%s): %s %s\n", stopRoot, evt.Type, rel)
 		return applyResult{}, nil
 	}
 	full := filepath.Join(a.cfg.Dir, filepath.FromSlash(rel))
@@ -475,7 +475,7 @@ func pathWithinBase(path, base string) bool {
 func (a *App) findStopRoot(rel string) (string, bool) {
 	rel = filepath.ToSlash(filepath.Clean(rel))
 	if rel == "" || rel == "." {
-		if fileExists(filepath.Join(a.cfg.Dir, ".stop")) {
+		if fileExists(filepath.Join(a.cfg.Dir, ".nosync")) {
 			return ".", true
 		}
 		return "", false
@@ -484,11 +484,11 @@ func (a *App) findStopRoot(rel string) (string, bool) {
 	for i := len(parts); i >= 1; i-- {
 		cand := strings.Join(parts[:i], "/")
 		full := filepath.Join(a.cfg.Dir, filepath.FromSlash(cand))
-		if fileExists(filepath.Join(full, ".stop")) {
+		if fileExists(filepath.Join(full, ".nosync")) {
 			return cand, true
 		}
 	}
-	if fileExists(filepath.Join(a.cfg.Dir, ".stop")) {
+	if fileExists(filepath.Join(a.cfg.Dir, ".nosync")) {
 		return ".", true
 	}
 	return "", false
@@ -501,21 +501,21 @@ func fileExists(path string) bool {
 
 func shouldIgnoreStopMarker(rel string) bool {
 	rel = filepath.ToSlash(filepath.Clean(rel))
-	return rel == ".stop" || strings.HasSuffix(rel, "/.stop")
+	return rel == ".nosync" || strings.HasSuffix(rel, "/.nosync")
 }
 
 func (a *App) shouldSkipBySenderStop(rel string) bool {
 	if rel == "" || rel == "." {
-		return fileExists(filepath.Join(a.cfg.Dir, ".stop"))
+		return fileExists(filepath.Join(a.cfg.Dir, ".nosync"))
 	}
 	parts := strings.Split(rel, "/")
 	for i := len(parts); i >= 1; i-- {
 		cand := strings.Join(parts[:i], "/")
-		if fileExists(filepath.Join(a.cfg.Dir, filepath.FromSlash(cand), ".stop")) {
+		if fileExists(filepath.Join(a.cfg.Dir, filepath.FromSlash(cand), ".nosync")) {
 			return true
 		}
 	}
-	return fileExists(filepath.Join(a.cfg.Dir, ".stop"))
+	return fileExists(filepath.Join(a.cfg.Dir, ".nosync"))
 }
 
 func (a *App) suppress(rel string, d time.Duration) {
