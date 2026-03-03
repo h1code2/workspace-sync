@@ -189,6 +189,14 @@ func (a *App) applyEvent(evt fileEvent) error {
 	if isExcluded(rel, a.cfg.Excludes) {
 		return nil
 	}
+	if shouldIgnoreStopMarker(rel) {
+		// receiver-local control file; never mutate it from remote
+		return nil
+	}
+	if stopRoot, stopped := a.findStopRoot(rel); stopped {
+		logf("<- skipped by .stop (%s): %s %s\n", stopRoot, evt.Type, rel)
+		return nil
+	}
 	full := filepath.Join(a.cfg.Dir, rel)
 	if !pathWithinBase(full, a.cfg.Dir) {
 		return fmt.Errorf("path escape: %s", rel)
@@ -354,6 +362,50 @@ func pathWithinBase(path, base string) bool {
 	return true
 }
 
+// findStopRoot returns the nearest ancestor directory (or self, if dir)
+// that contains a ".stop" marker file on receiver side.
+func (a *App) findStopRoot(rel string) (string, bool) {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "" || rel == "." {
+		if fileExists(filepath.Join(a.cfg.Dir, ".stop")) {
+			return ".", true
+		}
+		return "", false
+	}
+
+	parts := strings.Split(rel, "/")
+	for i := len(parts); i >= 1; i-- {
+		cand := strings.Join(parts[:i], "/")
+		full := filepath.Join(a.cfg.Dir, filepath.FromSlash(cand))
+		if st, err := os.Stat(full); err == nil && !st.IsDir() {
+			// if current candidate is a file path, check parent directory marker
+			if i == len(parts) {
+				continue
+			}
+		}
+		if fileExists(filepath.Join(full, ".stop")) {
+			return cand, true
+		}
+	}
+	if fileExists(filepath.Join(a.cfg.Dir, ".stop")) {
+		return ".", true
+	}
+	return "", false
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+func shouldIgnoreStopMarker(rel string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == ".stop" {
+		return true
+	}
+	return strings.HasSuffix(rel, "/.stop")
+}
+
 func (a *App) suppress(rel string, d time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -420,6 +472,16 @@ func (a *App) snapshotEnd(id string) error {
 		}
 		if isExcluded(rel, a.cfg.Excludes) {
 			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if shouldIgnoreStopMarker(rel) {
+			// receiver-local stop markers should never be removed by reconcile
+			return nil
+		}
+		if stopRoot, stopped := a.findStopRoot(rel); stopped {
+			if d.IsDir() && rel == stopRoot {
 				return filepath.SkipDir
 			}
 			return nil

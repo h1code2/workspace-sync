@@ -23,8 +23,29 @@
 
 - 共享 token 鉴权
 - 加密传输（AES-GCM）
+- 分块传输（大文件 `upsert_begin/chunk/end`），降低单次内存峰值
+- 发送端长连接复用，减少高频事件下重复建连开销
 
-### 4) 运行模式
+### 4) 接收端本地保护（`.stop`）
+
+- 在**接收端本地目录**下创建 `.stop` 文件，可暂停该目录及子目录的收敛同步。
+- 生效语义：
+  - 忽略该目录下收到的 `upsert/delete/mkdir` 事件
+  - 快照收敛（`snapshot_end` prune）也会跳过该目录
+- 用法示例：
+
+```bash
+# 暂停 docs/ 的收敛
+cd /path/to/receive-dir
+touch docs/.stop
+
+# 恢复收敛
+rm docs/.stop
+```
+
+> 说明：`.stop` 仅作为接收端本地控制标记，不会被远端事件覆盖。
+
+### 5) 运行模式
 
 - `send`：仅发送
 - `receive`：仅接收
