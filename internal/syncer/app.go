@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 )
+
+const defaultChunkSize = 1 * 1024 * 1024 // 1MB
 
 func logf(format string, args ...any) {
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -33,12 +36,35 @@ type pendingEvent struct {
 	when time.Time
 }
 
+type partialWrite struct {
+	tmpPath   string
+	file      *os.File
+	mode      uint32
+	modTime   int64
+	snapshot  string
+	received  int64
+	chunkSeen int
+}
+
+type fileFingerprint struct {
+	Size    int64
+	ModTime int64
+	Hash    string
+}
+
 type App struct {
 	cfg Config
 
 	mu         sync.Mutex
 	suppressTo map[string]time.Time
 	snapshots  map[string]*snapshotState
+	partials   map[string]*partialWrite
+
+	lastIndex  map[string]fileFingerprint
+	watchedDir map[string]struct{}
+
+	senderConn net.Conn
+	senderW    *bufio.Writer
 }
 
 func New(cfg Config) (*App, error) {
@@ -51,6 +77,9 @@ func New(cfg Config) (*App, error) {
 		cfg:        cfg,
 		suppressTo: make(map[string]time.Time),
 		snapshots:  make(map[string]*snapshotState),
+		partials:   make(map[string]*partialWrite),
+		lastIndex:  make(map[string]fileFingerprint),
+		watchedDir: make(map[string]struct{}),
 	}, nil
 }
 
@@ -66,8 +95,10 @@ func (a *App) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		a.closeSenderConn()
 		return ctx.Err()
 	case err := <-errCh:
+		a.closeSenderConn()
 		if errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -165,14 +196,30 @@ func (a *App) applyEvent(evt fileEvent) error {
 
 	slashRel := filepath.ToSlash(rel)
 	switch evt.Type {
+	case "snapshot_keep":
+		a.snapshotMarkSeen(evt.Snapshot, slashRel)
+		return nil
+	case "mkdir":
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			return err
+		}
+		a.suppress(rel, 1200*time.Millisecond)
+		a.snapshotMarkSeen(evt.Snapshot, slashRel)
+		logf("<- mkdir %s\n", rel)
+		return nil
 	case "delete":
+		a.cleanupPartial(slashRel)
 		if err := os.RemoveAll(full); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		a.suppress(rel, 1200*time.Millisecond)
-		logf("<- delete %s\n", rel)
+		if evt.IsDir {
+			logf("<- delete dir %s\n", rel)
+		} else {
+			logf("<- delete %s\n", rel)
+		}
 		return nil
-	case "upsert":
+	case "upsert": // backward-compatible single-frame upsert
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
 		}
@@ -191,9 +238,106 @@ func (a *App) applyEvent(evt fileEvent) error {
 		a.snapshotMarkSeen(evt.Snapshot, slashRel)
 		logf("<- upsert %s (%dB)\n", rel, len(evt.Data))
 		return nil
+	case "upsert_begin":
+		if err := a.beginPartialWrite(full, slashRel, evt); err != nil {
+			return err
+		}
+		return nil
+	case "upsert_chunk":
+		if err := a.writePartialChunk(slashRel, evt.Data); err != nil {
+			return err
+		}
+		return nil
+	case "upsert_end":
+		if err := a.finishPartialWrite(full, slashRel); err != nil {
+			return err
+		}
+		a.suppress(rel, 1200*time.Millisecond)
+		a.snapshotMarkSeen(evt.Snapshot, slashRel)
+		return nil
 	default:
 		return fmt.Errorf("unknown event type: %s", evt.Type)
 	}
+}
+
+func (a *App) beginPartialWrite(full, rel string, evt fileEvent) error {
+	a.cleanupPartial(rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	tmp := full + ".workspace-sync.part"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(evt.Mode))
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.partials[rel] = &partialWrite{
+		tmpPath:  tmp,
+		file:     f,
+		mode:     evt.Mode,
+		modTime:  evt.ModTime,
+		snapshot: evt.Snapshot,
+	}
+	a.mu.Unlock()
+	logf("<- upsert begin %s size=%d\n", rel, evt.Size)
+	return nil
+}
+
+func (a *App) writePartialChunk(rel string, data []byte) error {
+	a.mu.Lock()
+	pw, ok := a.partials[rel]
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("upsert_chunk without begin: %s", rel)
+	}
+	n, err := pw.file.Write(data)
+	if err != nil {
+		return err
+	}
+	pw.received += int64(n)
+	pw.chunkSeen++
+	return nil
+}
+
+func (a *App) finishPartialWrite(full, rel string) error {
+	a.mu.Lock()
+	pw, ok := a.partials[rel]
+	if ok {
+		delete(a.partials, rel)
+	}
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("upsert_end without begin: %s", rel)
+	}
+	if err := pw.file.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(pw.tmpPath, os.FileMode(pw.mode)); err != nil {
+		return err
+	}
+	if err := os.Rename(pw.tmpPath, full); err != nil {
+		return err
+	}
+	if pw.modTime > 0 {
+		mt := time.UnixMilli(pw.modTime)
+		_ = os.Chtimes(full, mt, mt)
+	}
+	logf("<- upsert end %s (%dB chunks=%d)\n", rel, pw.received, pw.chunkSeen)
+	return nil
+}
+
+func (a *App) cleanupPartial(rel string) {
+	a.mu.Lock()
+	pw, ok := a.partials[rel]
+	if ok {
+		delete(a.partials, rel)
+	}
+	a.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = pw.file.Close()
+	_ = os.Remove(pw.tmpPath)
 }
 
 func pathWithinBase(path, base string) bool {
@@ -381,7 +525,9 @@ func (a *App) runSender(ctx context.Context) error {
 
 			if ev.Op&fsnotify.Create != 0 {
 				if st, err := os.Stat(ev.Name); err == nil && st.IsDir() {
+					a.markDir(rel)
 					_ = a.addWatchRecursive(watcher, ev.Name)
+					_ = a.sendMkdir(ctx, rel)
 					a.queueDirFiles(q, ev.Name)
 					continue
 				}
@@ -416,7 +562,7 @@ func (a *App) runSender(ctx context.Context) error {
 func (a *App) queueDirFiles(q map[string]pendingEvent, dir string) {
 	now := time.Now()
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return nil
 		}
 		rel, relErr := filepath.Rel(a.cfg.Dir, path)
@@ -425,6 +571,13 @@ func (a *App) queueDirFiles(q map[string]pendingEvent, dir string) {
 		}
 		rel = filepath.ToSlash(filepath.Clean(rel))
 		if rel == "." || rel == "" || isExcluded(rel, a.cfg.Excludes) || a.isSuppressed(rel) {
+			if d.IsDir() && rel != "." && isExcluded(rel, a.cfg.Excludes) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			a.markDir(rel)
 			return nil
 		}
 		q[rel] = pendingEvent{op: fsnotify.Write, when: now}
@@ -446,6 +599,7 @@ func (a *App) addWatchRecursive(w *fsnotify.Watcher, root string) error {
 			return nil
 		}
 		if d.IsDir() {
+			a.markDir(rel)
 			if err := w.Add(path); err != nil {
 				return nil
 			}
@@ -456,11 +610,15 @@ func (a *App) addWatchRecursive(w *fsnotify.Watcher, root string) error {
 
 func (a *App) sendOne(ctx context.Context, rel string, op fsnotify.Op) error {
 	full := filepath.Join(a.cfg.Dir, rel)
-	evt := fileEvent{Path: rel}
+	isDir := a.isKnownDir(rel)
 
 	if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		if _, err := os.Stat(full); err != nil {
-			evt.Type = "delete"
+			evt := fileEvent{Type: "delete", Path: rel, IsDir: isDir}
+			if isDir {
+				a.unmarkDir(rel)
+			}
+			delete(a.lastIndex, rel)
 			return a.sendEvent(ctx, evt)
 		}
 	}
@@ -468,23 +626,80 @@ func (a *App) sendOne(ctx context.Context, rel string, op fsnotify.Op) error {
 	st, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			evt.Type = "delete"
+			evt := fileEvent{Type: "delete", Path: rel, IsDir: isDir}
+			if isDir {
+				a.unmarkDir(rel)
+			}
+			delete(a.lastIndex, rel)
 			return a.sendEvent(ctx, evt)
 		}
 		return err
 	}
 	if st.IsDir() {
-		return nil
+		a.markDir(rel)
+		return a.sendMkdir(ctx, rel)
 	}
-	data, err := os.ReadFile(full)
+
+	fp, err := a.sendFileUpsert(ctx, rel, full, st, "")
 	if err != nil {
 		return err
 	}
-	evt.Type = "upsert"
-	evt.Data = data
-	evt.Mode = uint32(st.Mode().Perm())
-	evt.ModTime = st.ModTime().UnixMilli()
+	a.lastIndex[rel] = fp
+	return nil
+}
+
+func (a *App) sendMkdir(ctx context.Context, rel string) error {
+	evt := fileEvent{Type: "mkdir", Path: rel}
 	return a.sendEvent(ctx, evt)
+}
+
+func (a *App) sendFileUpsert(ctx context.Context, rel, full string, st os.FileInfo, snapshot string) (fileFingerprint, error) {
+	f, err := os.Open(full)
+	if err != nil {
+		return fileFingerprint{}, err
+	}
+	defer f.Close()
+
+	mod := st.ModTime().UnixMilli()
+	begin := fileEvent{
+		Type:     "upsert_begin",
+		Snapshot: snapshot,
+		Path:     rel,
+		Mode:     uint32(st.Mode().Perm()),
+		ModTime:  mod,
+		Size:     st.Size(),
+	}
+	if err := a.sendEvent(ctx, begin); err != nil {
+		return fileFingerprint{}, err
+	}
+
+	h := sha256.New()
+	buf := make([]byte, defaultChunkSize)
+	for {
+		n, rErr := f.Read(buf)
+		if n > 0 {
+			chunk := append([]byte(nil), buf[:n]...)
+			if _, err := h.Write(chunk); err != nil {
+				return fileFingerprint{}, err
+			}
+			evt := fileEvent{Type: "upsert_chunk", Snapshot: snapshot, Path: rel, Data: chunk}
+			if err := a.sendEvent(ctx, evt); err != nil {
+				return fileFingerprint{}, err
+			}
+		}
+		if rErr == io.EOF {
+			break
+		}
+		if rErr != nil {
+			return fileFingerprint{}, rErr
+		}
+	}
+
+	if err := a.sendEvent(ctx, fileEvent{Type: "upsert_end", Snapshot: snapshot, Path: rel}); err != nil {
+		return fileFingerprint{}, err
+	}
+
+	return fileFingerprint{Size: st.Size(), ModTime: mod, Hash: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 func (a *App) sendEvent(ctx context.Context, evt fileEvent) error {
@@ -492,16 +707,59 @@ func (a *App) sendEvent(ctx context.Context, evt fileEvent) error {
 	if err != nil {
 		return err
 	}
+	if err := a.sendPacket(ctx, packet); err != nil {
+		return err
+	}
+	if evt.Type != "upsert_chunk" {
+		if evt.Path != "" {
+			logf("-> %s %s\n", evt.Type, evt.Path)
+		} else {
+			logf("-> %s\n", evt.Type)
+		}
+	}
+	return nil
+}
+
+func (a *App) sendPacket(ctx context.Context, packet []byte) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := a.ensureSenderConn(ctx); err != nil {
+			return err
+		}
+		if err := writeFrame(a.senderW, packet); err != nil {
+			a.closeSenderConn()
+			continue
+		}
+		if err := a.senderW.Flush(); err != nil {
+			a.closeSenderConn()
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("send failed after reconnect")
+}
+
+func (a *App) ensureSenderConn(ctx context.Context) error {
+	if a.senderConn != nil && a.senderW != nil {
+		return nil
+	}
 	conn, err := dialWithAuth(ctx, a.cfg.Peer, a.cfg.Token)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if err := writeFrame(conn, packet); err != nil {
-		return err
-	}
-	logf("-> %s %s\n", evt.Type, evt.Path)
+	a.senderConn = conn
+	a.senderW = bufio.NewWriterSize(conn, 256*1024)
 	return nil
+}
+
+func (a *App) closeSenderConn() {
+	if a.senderW != nil {
+		_ = a.senderW.Flush()
+	}
+	if a.senderConn != nil {
+		_ = a.senderConn.Close()
+	}
+	a.senderConn = nil
+	a.senderW = nil
 }
 
 func (a *App) initialSync(ctx context.Context) error {
@@ -509,25 +767,15 @@ func (a *App) initialSync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, err := dialWithAuth(ctx, a.cfg.Peer, a.cfg.Token)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 
-	send := func(evt fileEvent) error {
-		packet, err := encrypt(a.cfg.Token, evt)
-		if err != nil {
-			return err
-		}
-		return writeFrame(conn, packet)
-	}
-
-	if err := send(fileEvent{Type: "snapshot_begin", Snapshot: snapID}); err != nil {
+	if err := a.sendEvent(ctx, fileEvent{Type: "snapshot_begin", Snapshot: snapID}); err != nil {
 		return err
 	}
 
-	count := 0
+	newIndex := make(map[string]fileFingerprint, len(a.lastIndex))
+	sent := 0
+	kept := 0
+
 	err = filepath.WalkDir(a.cfg.Dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -552,38 +800,80 @@ func (a *App) initialSync(ctx context.Context) error {
 			return nil
 		}
 		if d.IsDir() {
+			a.markDir(rel)
 			return nil
 		}
 		st, statErr := d.Info()
 		if statErr != nil {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
+
+		fp, fpErr := fingerprintPath(path, st)
+		if fpErr != nil {
 			return nil
 		}
-		evt := fileEvent{
-			Type:     "upsert",
-			Snapshot: snapID,
-			Path:     rel,
-			Data:     data,
-			Mode:     uint32(st.Mode().Perm()),
-			ModTime:  st.ModTime().UnixMilli(),
+		newIndex[rel] = fp
+
+		if prev, ok := a.lastIndex[rel]; ok && prev == fp {
+			if err := a.sendEvent(ctx, fileEvent{Type: "snapshot_keep", Snapshot: snapID, Path: rel}); err != nil {
+				return err
+			}
+			kept++
+			return nil
 		}
-		if sendErr := send(evt); sendErr != nil {
+
+		if _, sendErr := a.sendFileUpsert(ctx, rel, path, st, snapID); sendErr != nil {
 			return sendErr
 		}
-		count++
+		sent++
 		return nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	if err := send(fileEvent{Type: "snapshot_end", Snapshot: snapID}); err != nil {
+
+	if err := a.sendEvent(ctx, fileEvent{Type: "snapshot_end", Snapshot: snapID}); err != nil {
 		return err
 	}
-	logf("initial snapshot sent id=%s files=%d\n", snapID, count)
+	a.lastIndex = newIndex
+	logf("initial snapshot sent id=%s sent=%d keep=%d\n", snapID, sent, kept)
 	return nil
+}
+
+func fingerprintPath(path string, st os.FileInfo) (fileFingerprint, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return fileFingerprint{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fileFingerprint{}, err
+	}
+	return fileFingerprint{
+		Size:    st.Size(),
+		ModTime: st.ModTime().UnixMilli(),
+		Hash:    hex.EncodeToString(h.Sum(nil)),
+	}, nil
+}
+
+func (a *App) markDir(rel string) {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "." || rel == "" {
+		return
+	}
+	a.watchedDir[rel] = struct{}{}
+}
+
+func (a *App) unmarkDir(rel string) {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	delete(a.watchedDir, rel)
+}
+
+func (a *App) isKnownDir(rel string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	_, ok := a.watchedDir[rel]
+	return ok
 }
 
 func newSnapshotID() (string, error) {

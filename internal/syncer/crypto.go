@@ -21,12 +21,14 @@ type wireMessage struct {
 }
 
 type fileEvent struct {
-	Type     string `json:"type"` // upsert | delete | snapshot_begin | snapshot_end
+	Type     string `json:"type"` // upsert | delete | snapshot_begin | snapshot_end | upsert_begin | upsert_chunk | upsert_end | mkdir | snapshot_keep
 	Snapshot string `json:"snapshot,omitempty"`
 	Path     string `json:"path,omitempty"`
 	Mode     uint32 `json:"mode,omitempty"`
 	ModTime  int64  `json:"mod_time,omitempty"`
 	Data     []byte `json:"data,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	IsDir    bool   `json:"is_dir,omitempty"`
 }
 
 func deriveKey(token string) []byte {
@@ -121,7 +123,7 @@ func decrypt(token string, packet []byte) (fileEvent, error) {
 		return fileEvent{}, err
 	}
 	switch evt.Type {
-	case "upsert", "delete":
+	case "upsert", "delete", "mkdir", "upsert_begin", "upsert_chunk", "upsert_end", "snapshot_keep":
 		if evt.Path == "" {
 			return fileEvent{}, errors.New("empty path")
 		}
