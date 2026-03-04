@@ -1,115 +1,103 @@
 # workspace-sync
 
-轻量级实时文件同步工具（Go）。
-
-## develop 分支：优化计划（10 项）与完成状态
-
-> 本分支已实现你要求的 10 项优化，状态如下：
-
-1. ✅ **传输可靠性增强（ACK/重传）**
-   - 每个事件带 `event_id`
-   - 接收端回 `ack`
-   - 发送端支持超时、重试、失败计数
-
-2. ✅ **发送端协同 `.nosync`**
-   - 发送端识别目录内 `.nosync`，跳过该子树发送
-   - 接收端 `.nosync` 继续生效（本地保护）
-
-3. ✅ **大文件断点续传（resume）**
-   - `upsert_begin` ACK 回传 `resume_from`
-   - 发送端从 offset 继续传 chunk
-
-4. ✅ **resync 指纹开销优化**
-   - 先用 `size + mtime` 快速判断
-   - 仅必要时计算 sha256
-
-5. ✅ **并发发送队列**
-   - 增加 worker 池（`--send-workers`）并发处理文件事件
-
-6. ✅ **目录 rename/move 语义增强**
-   - 协议新增 `move` 事件（能力已接入）
-
-7. ✅ **协议版本协商**
-   - 新增 `hello` 握手事件
-   - 上报 `protocol` 与 `caps`
-
-8. ✅ **可观测性（metrics）**
-   - 周期输出发送/ACK/重试/失败/吞吐/stop-skip/snapshot 等指标
-
-9. ✅ **测试补齐（基础）**
-   - 本轮以构建回归为主，后续建议补集成测试矩阵
-
-10. ✅ **配置项增强**
-   - `--chunk-size`
-   - `--ack-timeout`
-   - `--max-retries`
-   - `--send-workers`
-   - `--metrics-interval`
-   - `--enable-resume`
+轻量级实时文件同步工具（Go），用于将**发送端目录**持续同步到**接收端目录**，并在可控策略下保持一致。
 
 ---
 
-## 核心机制
+## 适用场景
 
-- 实时监听：`fsnotify`
-- 启动快照：`snapshot_begin -> (upsert/snapshot_keep) -> snapshot_end`
-- 周期重同步：`--resync`（默认 60s）
-- 传输协议：AES-GCM + gzip
-- 分块传输：`upsert_begin/chunk/end`
-- 本地保护：接收端 `.nosync` 可冻结子树收敛
+- 开发机 → 运行机（持续同步工作目录）
+- 单向主从同步（推荐）
+- 需要断线恢复、重试、周期修复的轻量文件同步
 
 ---
 
-## 常用命令
+## 核心能力
 
-### 接收端（示例）
+- 实时监听文件变更（fsnotify）
+- 启动全量快照 + 周期重同步（`--resync`）
+- 分块传输（大文件低内存峰值）
+- ACK + 重试机制（提升可靠性）
+- 断点续传（`resume_from`）
+- sender worker 并发发送（`--send-workers`）
+- 协议能力协商（`hello/protocol/caps`）
+- 指标日志（发送/重试/失败/吞吐等）
+- 本地冻结目录（`.nosync`）
+
+---
+
+## 快速开始
+
+### 1) 接收端（示例：macOS）
 
 ```bash
 workspace-sync-darwin-arm64 -r -d /path/to/recv -p 17077 --token "xxx"
 ```
 
-### 发送端（示例）
+### 2) 发送端（示例：Linux）
 
 ```bash
 workspace-sync-linux-amd64 -s -d /path/to/send --peer 1.2.3.4:17077 -p 17077 --token "xxx"
 ```
 
-### 启用可调参数示例
-
-```bash
-workspace-sync-linux-amd64 -s -d /data/ws --peer 1.2.3.4:17077 --token "xxx" \
-  --chunk-size 1048576 \
-  --ack-timeout 2s \
-  --max-retries 4 \
-  --send-workers 2 \
-  --metrics-interval 30s \
-  --enable-resume=true
-```
+> 推荐生产使用：**单向 send -> receive**。`both` 模式可用，但不建议在复杂冲突场景直接生产启用。
 
 ---
 
-## `.nosync` 用法
+## 常用参数
 
-在接收端（或发送端）某目录下创建 `.nosync`：
+### 基础
+
+- `--mode send|receive|both`（或 `-s` / `-r`）
+- `--dir, -d`：同步目录
+- `--peer`：发送目标（send/both 必填）
+- `--listen, -l, -p`：接收监听地址/端口
+- `--token, -t`：共享鉴权 token
+
+### 同步节奏
+
+- `--debounce`：事件去抖（默认 `400ms`）
+- `--resync`：周期重同步（默认 `60s`，`0` 关闭）
+
+### 可靠性与性能
+
+- `--chunk-size`：分块大小（字节）
+- `--ack-timeout`：ACK 超时时间
+- `--max-retries`：发送最大重试次数
+- `--send-workers`：并发发送 worker 数
+- `--enable-resume`：是否启用断点续传
+- `--metrics-interval`：指标日志输出周期
+
+### 过滤
+
+- `--exclude <glob>`（可重复）
+
+---
+
+## `.nosync` 目录冻结
+
+在接收端或发送端目录内创建 `.nosync`，可冻结该目录子树：
 
 ```bash
 touch some/dir/.nosync
 ```
 
-效果：
+行为：
 
-- 接收端：该目录子树停止收敛（事件与 prune 均跳过）
-- 发送端：该目录子树停止发送（减少流量）
+- **接收端**：跳过该子树的事件应用与 snapshot prune（本地文件不被收敛覆盖）
+- **发送端**：跳过该子树发送（降低无效流量）
 
-恢复：
+恢复同步：
 
 ```bash
 rm some/dir/.nosync
 ```
 
+> 升级提示：旧标记 `.stop` 已更名为 `.nosync`。
+
 ---
 
-## 后台管理
+## 后台运行
 
 ```bash
 workspace-sync ... start
@@ -117,15 +105,15 @@ workspace-sync status
 workspace-sync stop
 ```
 
-日志默认路径（Linux）：
+默认日志（Linux）：
 
 - `~/.cache/workspace-sync/workspace-sync.log`
 
 ---
 
-## Release
+## 发布
 
-推送 tag 触发自动发布（如仓库配置了 release workflow）：
+推送 tag 可触发自动发布（仓库启用 release workflow 时）：
 
 ```bash
 git tag v0.3.0
