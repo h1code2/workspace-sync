@@ -237,7 +237,7 @@ func normalizePeer(peer, listen string) string {
 	return net.JoinHostPort(peer, port)
 }
 
-func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool, partialTTL time.Duration) []string {
+func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool, partialTTL time.Duration, conflictPolicy string) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
@@ -254,6 +254,7 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.D
 		"--metrics-interval=" + metricsInterval.String(),
 		"--enable-resume=" + strconv.FormatBool(enableResume),
 		"--partial-ttl=" + partialTTL.String(),
+		"--conflict-policy=" + conflictPolicy,
 	}
 	for _, ex := range excludes {
 		args = append(args, "--exclude="+ex)
@@ -301,6 +302,7 @@ func main() {
 	var metricsInterval time.Duration
 	var enableResume bool
 	var partialTTL time.Duration
+	var conflictPolicy string
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
@@ -323,6 +325,7 @@ func main() {
 	flag.DurationVar(&metricsInterval, "metrics-interval", 30*time.Second, "Metrics log output interval")
 	flag.BoolVar(&enableResume, "enable-resume", true, "Enable resumable chunk transfer")
 	flag.DurationVar(&partialTTL, "partial-ttl", 2*time.Hour, "TTL for stale partial transfer files (0 to disable cleanup)")
+	flag.StringVar(&conflictPolicy, "conflict-policy", "sender-wins", "Conflict policy on receiver: sender-wins|keep-newer")
 	flag.BoolVar(&backgroundChild, "background-child", false, "internal: run as detached background child")
 
 	// Short mode flags (requested UX)
@@ -381,7 +384,7 @@ func main() {
 			if token == "" {
 				log.Fatal("--token is required")
 			}
-			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume, partialTTL)
+			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume, partialTTL, conflictPolicy)
 			if err := startBackground(pidFile, logFile, logMaxBytes, runArgs); err != nil {
 				log.Fatal(err)
 			}
@@ -411,6 +414,7 @@ func main() {
 		MetricsInterval: metricsInterval,
 		EnableResume:    enableResume,
 		PartialTTL:      partialTTL,
+		ConflictPolicy:  strings.TrimSpace(conflictPolicy),
 	}
 	if len(cfg.Excludes) == 0 {
 		cfg.Excludes = []string{".git/*", "node_modules/*", ".DS_Store"}

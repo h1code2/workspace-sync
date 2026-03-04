@@ -89,7 +89,8 @@
 ### 3.5 并发发送队列
 
 - 增加 worker 池并发处理发送任务
-- `--send-workers`：发送 worker 数（单连接顺序发送，队列化执行）
+- `--send-workers`：事件生产并发（最终发送在单连接上顺序执行，确保 ACK 对齐）
+- 队列在高负载时会回压（阻塞等待），不再静默丢事件
 - 在多小文件场景提升整体吞吐
 
 ### 3.6 resync 成本优化
@@ -107,7 +108,12 @@
   - stop-skip / resume 次数
 - 参数：`--metrics-interval`
 
-### 3.8 `.nosync` 目录冻结（发送端 + 接收端）
+### 3.8 partial 清理增强
+
+- `--partial-ttl` 不仅清理磁盘上的 `.workspace-sync.part`，也会回收内存中的超时 partial 状态
+- 可降低长时间异常传输后的句柄/状态残留风险
+
+### 3.9 `.nosync` 目录冻结（发送端 + 接收端）
 
 在任意目录放置 `.nosync`，即可冻结该目录子树：
 
@@ -119,6 +125,14 @@
 > 注意：旧标记 `.stop` 已重命名为 `.nosync`。
 
 ---
+
+
+### 3.10 冲突策略（P1）
+
+- `--conflict-policy sender-wins|keep-newer`（默认 `sender-wins`）
+- `sender-wins`：保持现有行为，接收端以发送端内容为准
+- `keep-newer`：若接收端本地文件 `mtime` 更新于入站事件，则跳过覆盖（包含 `upsert` 与分块 `upsert_begin/chunk/end`）
+- 相关跳过次数会计入 metrics：`conflict_skip`
 
 ## 4. 快速开始
 
@@ -156,10 +170,11 @@ workspace-sync-linux-amd64 -s -d /path/to/send --peer 1.2.3.4:17077 -p 17077 --t
 - `--chunk-size`：分块大小（字节）
 - `--ack-timeout`：ACK 等待超时
 - `--max-retries`：单事件最大重试次数
-- `--send-workers`：发送 worker 数（单连接顺序发送，队列化执行）
+- `--send-workers`：事件并发生产 worker 数（网络发送保持单连接有序 ACK）
 - `--enable-resume`：是否启用断点续传
 - `--metrics-interval`：指标输出周期
-- `--partial-ttl`：残留分块文件（.workspace-sync.part）清理时间（0 关闭清理）
+- `--partial-ttl`：残留分块状态清理时间（磁盘 .workspace-sync.part + 内存 partial 状态；0 关闭清理）
+- `--conflict-policy`：冲突策略（`sender-wins` 或 `keep-newer`）
 
 ### 排除规则
 

@@ -43,6 +43,8 @@ type partialWrite struct {
 	snapshot  string
 	received  int64
 	chunkSeen int
+	discard   bool
+	updatedAt time.Time
 }
 
 type fileFingerprint struct {
@@ -69,6 +71,7 @@ type metrics struct {
 	snapshotPruned   int64
 	moveEvents       int64
 	resumedTransfers int64
+	conflictSkips    int64
 }
 
 type App struct {
@@ -150,7 +153,7 @@ func (a *App) metricsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			logf("metrics sent=%d acked=%d retried=%d failed=%d recv=%d bytes_sent=%d bytes_recv=%d stop_skips=%d snap(sent=%d keep=%d prune=%d) move=%d resume=%d\n",
+			logf("metrics sent=%d acked=%d retried=%d failed=%d recv=%d bytes_sent=%d bytes_recv=%d stop_skips=%d snap(sent=%d keep=%d prune=%d) move=%d resume=%d conflict_skip=%d\n",
 				atomic.LoadInt64(&a.metrics.sentEvents),
 				atomic.LoadInt64(&a.metrics.ackedEvents),
 				atomic.LoadInt64(&a.metrics.retriedEvents),
@@ -164,6 +167,7 @@ func (a *App) metricsLoop(ctx context.Context) {
 				atomic.LoadInt64(&a.metrics.snapshotPruned),
 				atomic.LoadInt64(&a.metrics.moveEvents),
 				atomic.LoadInt64(&a.metrics.resumedTransfers),
+				atomic.LoadInt64(&a.metrics.conflictSkips),
 			)
 		}
 	}
@@ -184,12 +188,13 @@ func (a *App) cleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			a.cleanupStalePartials()
+			a.cleanupStalePartialsOnDisk()
+			a.cleanupStalePartialsInMemory()
 		}
 	}
 }
 
-func (a *App) cleanupStalePartials() {
+func (a *App) cleanupStalePartialsOnDisk() {
 	if a.cfg.PartialTTL == 0 {
 		return
 	}
@@ -211,6 +216,31 @@ func (a *App) cleanupStalePartials() {
 		}
 		return nil
 	})
+}
+
+func (a *App) cleanupStalePartialsInMemory() {
+	if a.cfg.PartialTTL == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-a.cfg.PartialTTL)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for rel, pw := range a.partials {
+		if pw == nil {
+			delete(a.partials, rel)
+			continue
+		}
+		if !pw.updatedAt.IsZero() && pw.updatedAt.After(cutoff) {
+			continue
+		}
+		if pw.file != nil {
+			_ = pw.file.Close()
+		}
+		if pw.tmpPath != "" {
+			_ = os.Remove(pw.tmpPath)
+		}
+		delete(a.partials, rel)
+	}
 }
 
 func (a *App) runReceiver(ctx context.Context) error {
@@ -299,6 +329,17 @@ func (a *App) writeEvent(w *bufio.Writer, evt fileEvent) error {
 	return nil
 }
 
+func (a *App) shouldKeepLocalByConflict(full string, incomingModTime int64) bool {
+	if a.cfg.ConflictPolicy != "keep-newer" || incomingModTime <= 0 {
+		return false
+	}
+	st, err := os.Stat(full)
+	if err != nil {
+		return false
+	}
+	return st.ModTime().UnixMilli() > incomingModTime
+}
+
 func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 	switch evt.Type {
 	case "snapshot_begin":
@@ -354,6 +395,9 @@ func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 		return applyResult{}, nil
 	case "move":
 		oldRel := filepath.ToSlash(filepath.Clean(evt.OldPath))
+		if oldRel == "." || oldRel == "" || oldRel == ".." || filepath.IsAbs(oldRel) {
+			return applyResult{}, fmt.Errorf("unsafe move old path: %s", evt.OldPath)
+		}
 		oldFull := filepath.Join(a.cfg.Dir, filepath.FromSlash(oldRel))
 		if !pathWithinBase(oldFull, a.cfg.Dir) {
 			return applyResult{}, fmt.Errorf("move old path escape: %s", oldRel)
@@ -377,6 +421,12 @@ func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 		a.suppress(rel, 1200*time.Millisecond)
 		return applyResult{}, nil
 	case "upsert":
+		if a.shouldKeepLocalByConflict(full, evt.ModTime) {
+			atomic.AddInt64(&a.metrics.conflictSkips, 1)
+			logf("<- conflict keep-newer skip upsert %s\n", rel)
+			a.snapshotMarkSeen(evt.Snapshot, slashRel)
+			return applyResult{}, nil
+		}
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return applyResult{}, err
 		}
@@ -421,6 +471,15 @@ func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 }
 
 func (a *App) beginPartialWrite(full, rel string, evt fileEvent) (int64, error) {
+	if a.shouldKeepLocalByConflict(full, evt.ModTime) {
+		a.cleanupPartial(rel)
+		a.mu.Lock()
+		a.partials[rel] = &partialWrite{snapshot: evt.Snapshot, discard: true, updatedAt: time.Now()}
+		a.mu.Unlock()
+		atomic.AddInt64(&a.metrics.conflictSkips, 1)
+		logf("<- conflict keep-newer skip upsert_begin %s\n", rel)
+		return 0, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return 0, err
 	}
@@ -443,15 +502,25 @@ func (a *App) beginPartialWrite(full, rel string, evt fileEvent) (int64, error) 
 		}
 	}
 
+	// Close any in-memory partial writer for this rel first.
+	a.mu.Lock()
+	if old, ok := a.partials[rel]; ok {
+		if old.file != nil {
+			_ = old.file.Close()
+		}
+		delete(a.partials, rel)
+	}
+	a.mu.Unlock()
+	if resumeFrom == 0 {
+		_ = os.Remove(tmp)
+	}
+
 	f, err := os.OpenFile(tmp, openFlag, os.FileMode(evt.Mode))
 	if err != nil {
 		return 0, err
 	}
-	if resumeFrom == 0 {
-		a.cleanupPartial(rel)
-	}
 	a.mu.Lock()
-	a.partials[rel] = &partialWrite{tmpPath: tmp, file: f, mode: evt.Mode, modTime: evt.ModTime, snapshot: evt.Snapshot, received: resumeFrom}
+	a.partials[rel] = &partialWrite{tmpPath: tmp, file: f, mode: evt.Mode, modTime: evt.ModTime, snapshot: evt.Snapshot, received: resumeFrom, updatedAt: time.Now()}
 	a.mu.Unlock()
 	return resumeFrom, nil
 }
@@ -463,12 +532,19 @@ func (a *App) writePartialChunk(rel string, data []byte) error {
 	if !ok {
 		return fmt.Errorf("upsert_chunk without begin: %s", rel)
 	}
+	if pw.discard {
+		pw.received += int64(len(data))
+		pw.chunkSeen++
+		pw.updatedAt = time.Now()
+		return nil
+	}
 	n, err := pw.file.Write(data)
 	if err != nil {
 		return err
 	}
 	pw.received += int64(n)
 	pw.chunkSeen++
+	pw.updatedAt = time.Now()
 	return nil
 }
 
@@ -481,6 +557,9 @@ func (a *App) finishPartialWrite(full, rel string) error {
 	a.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("upsert_end without begin: %s", rel)
+	}
+	if pw.discard {
+		return nil
 	}
 	if err := pw.file.Close(); err != nil {
 		return err
@@ -787,9 +866,6 @@ func (a *App) enqueueTask(ctx context.Context, task pendingEventTask) bool {
 	case a.senderQueue <- task:
 		return true
 	case <-ctx.Done():
-		return false
-	default:
-		logf("send queue full, dropping event: %s\n", task.rel)
 		return false
 	}
 }

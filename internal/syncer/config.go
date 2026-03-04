@@ -23,6 +23,7 @@ type Config struct {
 	MetricsInterval time.Duration
 	EnableResume    bool
 	PartialTTL      time.Duration
+	ConflictPolicy  string
 }
 
 func (c Config) Validate() error {
@@ -74,6 +75,11 @@ func (c Config) Validate() error {
 	}
 	if c.PartialTTL < 0 {
 		return fmt.Errorf("--partial-ttl must be >= 0")
+	}
+	switch c.ConflictPolicy {
+	case "", "sender-wins", "keep-newer":
+	default:
+		return fmt.Errorf("--conflict-policy must be sender-wins|keep-newer")
 	}
 	return nil
 }
