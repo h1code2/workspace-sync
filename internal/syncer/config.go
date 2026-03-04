@@ -22,6 +22,7 @@ type Config struct {
 	SendWorkers     int
 	MetricsInterval time.Duration
 	EnableResume    bool
+	PartialTTL      time.Duration
 }
 
 func (c Config) Validate() error {
@@ -70,6 +71,9 @@ func (c Config) Validate() error {
 	}
 	if c.MetricsInterval <= 0 {
 		return fmt.Errorf("--metrics-interval must be > 0")
+	}
+	if c.PartialTTL < 0 {
+		return fmt.Errorf("--partial-ttl must be >= 0")
 	}
 	return nil
 }

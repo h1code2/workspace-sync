@@ -237,7 +237,7 @@ func normalizePeer(peer, listen string) string {
 	return net.JoinHostPort(peer, port)
 }
 
-func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool) []string {
+func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool, partialTTL time.Duration) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
@@ -253,6 +253,7 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.D
 		"--send-workers=" + strconv.Itoa(sendWorkers),
 		"--metrics-interval=" + metricsInterval.String(),
 		"--enable-resume=" + strconv.FormatBool(enableResume),
+		"--partial-ttl=" + partialTTL.String(),
 	}
 	for _, ex := range excludes {
 		args = append(args, "--exclude="+ex)
@@ -299,6 +300,7 @@ func main() {
 	var sendWorkers int
 	var metricsInterval time.Duration
 	var enableResume bool
+	var partialTTL time.Duration
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
@@ -317,9 +319,10 @@ func main() {
 	flag.IntVar(&chunkSize, "chunk-size", 1024*1024, "Chunk size in bytes for file transfer")
 	flag.DurationVar(&ackTimeout, "ack-timeout", 2*time.Second, "Timeout for waiting event ACK")
 	flag.IntVar(&maxRetries, "max-retries", 4, "Max retries for sending an event before failing")
-	flag.IntVar(&sendWorkers, "send-workers", 2, "Concurrent sender workers for file events")
+	flag.IntVar(&sendWorkers, "send-workers", 2, "Concurrent sender workers for file events (send is ordered per connection)")
 	flag.DurationVar(&metricsInterval, "metrics-interval", 30*time.Second, "Metrics log output interval")
 	flag.BoolVar(&enableResume, "enable-resume", true, "Enable resumable chunk transfer")
+	flag.DurationVar(&partialTTL, "partial-ttl", 2*time.Hour, "TTL for stale partial transfer files (0 to disable cleanup)")
 	flag.BoolVar(&backgroundChild, "background-child", false, "internal: run as detached background child")
 
 	// Short mode flags (requested UX)
@@ -378,7 +381,7 @@ func main() {
 			if token == "" {
 				log.Fatal("--token is required")
 			}
-			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume)
+			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume, partialTTL)
 			if err := startBackground(pidFile, logFile, logMaxBytes, runArgs); err != nil {
 				log.Fatal(err)
 			}
@@ -407,6 +410,7 @@ func main() {
 		SendWorkers:     sendWorkers,
 		MetricsInterval: metricsInterval,
 		EnableResume:    enableResume,
+		PartialTTL:      partialTTL,
 	}
 	if len(cfg.Excludes) == 0 {
 		cfg.Excludes = []string{".git/*", "node_modules/*", ".DS_Store"}

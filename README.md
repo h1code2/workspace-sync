@@ -52,9 +52,10 @@
 - 删除：`delete`
 - 重命名/移动：`move`
 
----
+### 2.4 可靠性补充
 
-## 3. 昨天完成的核心优化特性（重点）
+- 发送端事件通过队列串行化发送（单连接 ACK 顺序一致）
+- 未完成的分块文件会以 `.workspace-sync.part` 暂存，支持超时清理（见 `--partial-ttl`）
 
 以下是本次迭代完成并已落地到 `develop` 的关键能力：
 
@@ -88,7 +89,7 @@
 ### 3.5 并发发送队列
 
 - 增加 worker 池并发处理发送任务
-- 参数：`--send-workers`
+- `--send-workers`：发送 worker 数（单连接顺序发送，队列化执行）
 - 在多小文件场景提升整体吞吐
 
 ### 3.6 resync 成本优化
@@ -155,9 +156,10 @@ workspace-sync-linux-amd64 -s -d /path/to/send --peer 1.2.3.4:17077 -p 17077 --t
 - `--chunk-size`：分块大小（字节）
 - `--ack-timeout`：ACK 等待超时
 - `--max-retries`：单事件最大重试次数
-- `--send-workers`：发送并发 worker 数
+- `--send-workers`：发送 worker 数（单连接顺序发送，队列化执行）
 - `--enable-resume`：是否启用断点续传
 - `--metrics-interval`：指标输出周期
+- `--partial-ttl`：残留分块文件（.workspace-sync.part）清理时间（0 关闭清理）
 
 ### 排除规则
 

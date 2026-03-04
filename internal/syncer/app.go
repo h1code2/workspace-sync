@@ -82,12 +82,16 @@ type App struct {
 	lastIndex  map[string]fileFingerprint
 	watchedDir map[string]struct{}
 
+	// senderConn is used only within sendPacketAndWaitAck to avoid ack mismatch in concurrent sends.
 	senderConn net.Conn
 	senderW    *bufio.Writer
 	senderR    *bufio.Reader
 	sendMu     sync.Mutex
 
 	receiverCaps []string
+
+	senderQueue     chan pendingEventTask
+	senderCloseOnce sync.Once
 
 	metrics metrics
 }
@@ -98,25 +102,31 @@ func New(cfg Config) (*App, error) {
 		return nil, err
 	}
 	cfg.Dir = abs
-	return &App{
+	app := &App{
 		cfg:        cfg,
 		suppressTo: make(map[string]time.Time),
 		snapshots:  make(map[string]*snapshotState),
 		partials:   make(map[string]*partialWrite),
 		lastIndex:  make(map[string]fileFingerprint),
 		watchedDir: make(map[string]struct{}),
-	}, nil
+	}
+	app.senderQueue = make(chan pendingEventTask, 4096)
+	return app, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 	go a.metricsLoop(ctx)
+	if a.cfg.PartialTTL > 0 {
+		go a.cleanupLoop(ctx)
+	}
 
 	if a.cfg.Mode == "receive" || a.cfg.Mode == "both" {
 		go func() { errCh <- a.runReceiver(ctx) }()
 	}
 	if a.cfg.Mode == "send" || a.cfg.Mode == "both" {
 		go func() { errCh <- a.runSender(ctx) }()
+		go func() { errCh <- a.runSenderWorker(ctx) }()
 	}
 
 	select {
@@ -157,6 +167,50 @@ func (a *App) metricsLoop(ctx context.Context) {
 			)
 		}
 	}
+}
+
+func (a *App) cleanupLoop(ctx context.Context) {
+	if a.cfg.PartialTTL == 0 {
+		return
+	}
+	interval := 10 * time.Minute
+	if a.cfg.PartialTTL < interval {
+		interval = a.cfg.PartialTTL
+	}
+	tk := time.NewTicker(interval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			a.cleanupStalePartials()
+		}
+	}
+}
+
+func (a *App) cleanupStalePartials() {
+	if a.cfg.PartialTTL == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-a.cfg.PartialTTL)
+	_ = filepath.WalkDir(a.cfg.Dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := filepath.Base(path)
+		if !strings.HasSuffix(name, ".workspace-sync.part") {
+			return nil
+		}
+		st, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if st.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 }
 
 func (a *App) runReceiver(ctx context.Context) error {
@@ -675,35 +729,10 @@ func (a *App) runSender(ctx context.Context) error {
 		defer resyncTicker.Stop()
 	}
 
-	tasks := make(chan pendingEventTask, 1024)
-	var wg sync.WaitGroup
-	for i := 0; i < a.cfg.SendWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case t, ok := <-tasks:
-					if !ok {
-						return
-					}
-					if err := a.sendOne(ctx, t.rel, t.op); err != nil {
-						logf("send error (%s): %v\n", t.rel, err)
-					}
-				}
-			}
-		}()
-	}
-	defer func() {
-		close(tasks)
-		wg.Wait()
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
+			a.senderCloseOnce.Do(func() { close(a.senderQueue) })
 			return ctx.Err()
 		case ev := <-watcher.Events:
 			rel, err := filepath.Rel(a.cfg.Dir, ev.Name)
@@ -719,7 +748,7 @@ func (a *App) runSender(ctx context.Context) error {
 					a.markDir(rel)
 					_ = a.addWatchRecursive(watcher, ev.Name)
 					_ = a.sendMkdir(ctx, rel)
-					a.queueDirFiles(q, ev.Name)
+					a.queueDirFiles(ctx, q, ev.Name)
 					continue
 				}
 			}
@@ -734,7 +763,10 @@ func (a *App) runSender(ctx context.Context) error {
 				if now.Sub(item.when) < a.cfg.Debounce {
 					continue
 				}
-				tasks <- pendingEventTask{rel: rel, op: item.op}
+				if !a.enqueueTask(ctx, pendingEventTask{rel: rel, op: item.op}) {
+					a.senderCloseOnce.Do(func() { close(a.senderQueue) })
+					return ctx.Err()
+				}
 				delete(q, rel)
 			}
 		case <-resyncCh:
@@ -750,8 +782,19 @@ type pendingEventTask struct {
 	op  fsnotify.Op
 }
 
-func (a *App) queueDirFiles(q map[string]pendingEvent, dir string) {
-	now := time.Now()
+func (a *App) enqueueTask(ctx context.Context, task pendingEventTask) bool {
+	select {
+	case a.senderQueue <- task:
+		return true
+	case <-ctx.Done():
+		return false
+	default:
+		logf("send queue full, dropping event: %s\n", task.rel)
+		return false
+	}
+}
+
+func (a *App) queueDirFiles(ctx context.Context, q map[string]pendingEvent, dir string) {
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -771,7 +814,9 @@ func (a *App) queueDirFiles(q map[string]pendingEvent, dir string) {
 			a.markDir(rel)
 			return nil
 		}
-		q[rel] = pendingEvent{op: fsnotify.Write, when: now}
+		if !a.enqueueTask(ctx, pendingEventTask{rel: rel, op: fsnotify.Write}) {
+			return ctx.Err()
+		}
 		return nil
 	})
 }
@@ -797,6 +842,31 @@ func (a *App) addWatchRecursive(w *fsnotify.Watcher, root string) error {
 		}
 		return nil
 	})
+}
+
+func (a *App) runSenderWorker(ctx context.Context) error {
+	var wg sync.WaitGroup
+	for i := 0; i < a.cfg.SendWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t, ok := <-a.senderQueue:
+					if !ok {
+						return
+					}
+					if err := a.sendOne(ctx, t.rel, t.op); err != nil {
+						logf("send error (%s): %v\n", t.rel, err)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return nil
 }
 
 func (a *App) sendOne(ctx context.Context, rel string, op fsnotify.Op) error {
