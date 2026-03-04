@@ -1,121 +1,198 @@
 # workspace-sync
 
-轻量级实时文件同步工具（Go），用于将**发送端目录**持续同步到**接收端目录**，并在可控策略下保持一致。
+`workspace-sync` 是一个面向开发与运维场景的轻量级目录同步工具。
+
+它的目标很明确：
+
+- 把**发送端目录**的变更持续同步到**接收端目录**
+- 在网络波动、漏事件、手工误改等情况下仍可自动收敛
+- 提供可控的“局部冻结”（`.nosync`）能力，避免你本地工作目录被强制覆盖
 
 ---
 
-## 适用场景
+## 1. 软件作用（解决什么问题）
 
-- 开发机 → 运行机（持续同步工作目录）
-- 单向主从同步（推荐）
-- 需要断线恢复、重试、周期修复的轻量文件同步
+在多机协作时，常见痛点是：
 
----
+1. 实时同步不稳定：偶发网络抖动就可能漏文件
+2. 大文件占内存：一次性读写导致峰值过高
+3. 本地临时调试会被“收敛”覆盖
+4. 目录结构变化（新建、删除、重命名）容易出现不一致
 
-## 核心能力
+`workspace-sync` 的设计就是为了解决这些问题：
 
-- 实时监听文件变更（fsnotify）
-- 启动全量快照 + 周期重同步（`--resync`）
-- 分块传输（大文件低内存峰值）
-- ACK + 重试机制（提升可靠性）
-- 断点续传（`resume_from`）
-- sender worker 并发发送（`--send-workers`）
-- 协议能力协商（`hello/protocol/caps`）
-- 指标日志（发送/重试/失败/吞吐等）
-- 本地冻结目录（`.nosync`）
+- 通过实时监听 + 快照重同步，保证最终一致
+- 通过分块传输 + 断点续传，降低资源消耗并增强鲁棒性
+- 通过 ACK / 重试机制，降低事件丢失概率
+- 通过 `.nosync` 标记，让你可按目录暂停同步收敛
 
 ---
 
-## 快速开始
+## 2. 功能总览
 
-### 1) 接收端（示例：macOS）
+### 2.1 同步模式
+
+- `send`：只发送（推荐生产）
+- `receive`：只接收
+- `both`：双向（可用，但冲突策略不建议复杂生产场景直接使用）
+
+### 2.2 同步流程
+
+- 启动时执行快照同步：
+  - `snapshot_begin`
+  - 文件按需 `upsert` 或 `snapshot_keep`
+  - `snapshot_end`
+- 运行中监听文件系统事件，实时下发变更
+- 周期性 `--resync` 用于修复漏事件或手工改动
+
+### 2.3 目录与文件事件
+
+- 新建目录：`mkdir`
+- 文件写入：`upsert_begin / upsert_chunk / upsert_end`
+- 删除：`delete`
+- 重命名/移动：`move`
+
+---
+
+## 3. 昨天完成的核心优化特性（重点）
+
+以下是本次迭代完成并已落地到 `develop` 的关键能力：
+
+### 3.1 可靠性增强：ACK + 重试
+
+- 每个事件都有唯一 `event_id`
+- 接收端处理后返回 `ack`
+- 发送端支持：
+  - `--ack-timeout`
+  - `--max-retries`
+- 可显著降低网络抖动场景下的丢事件风险
+
+### 3.2 协议协商：hello / protocol / caps
+
+- 建连后先发送 `hello`
+- 双端交换协议版本与能力集（caps）
+- 为后续协议演进与兼容留出空间
+
+### 3.3 大文件分块传输
+
+- 文件不再整块读入内存
+- 使用 `--chunk-size` 控制分块大小
+- 显著降低大文件同步时的内存峰值
+
+### 3.4 断点续传（resume）
+
+- 接收端在 `upsert_begin` 阶段可回传 `resume_from`
+- 发送端从指定偏移继续发 chunk
+- 网络中断后无需总是从 0 开始重传
+
+### 3.5 并发发送队列
+
+- 增加 worker 池并发处理发送任务
+- 参数：`--send-workers`
+- 在多小文件场景提升整体吞吐
+
+### 3.6 resync 成本优化
+
+- 先做 `size + mtime` 快速判断
+- 仅在必要时计算 SHA256
+- 减少无效 hash 计算和 IO 压力
+
+### 3.7 可观测性（metrics）
+
+- 周期输出关键指标：
+  - sent / acked / retried / failed
+  - bytes_sent / bytes_recv
+  - snapshot sent/keep/prune
+  - stop-skip / resume 次数
+- 参数：`--metrics-interval`
+
+### 3.8 `.nosync` 目录冻结（发送端 + 接收端）
+
+在任意目录放置 `.nosync`，即可冻结该目录子树：
+
+- 接收端：跳过事件应用与 prune（本地不会被收敛覆盖）
+- 发送端：跳过该子树发送（减少无效流量）
+
+恢复时删除 `.nosync` 即可。
+
+> 注意：旧标记 `.stop` 已重命名为 `.nosync`。
+
+---
+
+## 4. 快速开始
+
+### 4.1 接收端（示例）
 
 ```bash
 workspace-sync-darwin-arm64 -r -d /path/to/recv -p 17077 --token "xxx"
 ```
 
-### 2) 发送端（示例：Linux）
+### 4.2 发送端（示例）
 
 ```bash
 workspace-sync-linux-amd64 -s -d /path/to/send --peer 1.2.3.4:17077 -p 17077 --token "xxx"
 ```
 
-> 推荐生产使用：**单向 send -> receive**。`both` 模式可用，但不建议在复杂冲突场景直接生产启用。
-
 ---
 
-## 常用参数
+## 5. 参数说明
 
-### 基础
+### 基础参数
 
 - `--mode send|receive|both`（或 `-s` / `-r`）
 - `--dir, -d`：同步目录
 - `--peer`：发送目标（send/both 必填）
-- `--listen, -l, -p`：接收监听地址/端口
+- `--listen, -l, -p`：监听地址/端口
 - `--token, -t`：共享鉴权 token
 
 ### 同步节奏
 
 - `--debounce`：事件去抖（默认 `400ms`）
-- `--resync`：周期重同步（默认 `60s`，`0` 关闭）
+- `--resync`：周期重同步（默认 `60s`，设为 `0` 可关闭）
 
 ### 可靠性与性能
 
 - `--chunk-size`：分块大小（字节）
-- `--ack-timeout`：ACK 超时时间
-- `--max-retries`：发送最大重试次数
-- `--send-workers`：并发发送 worker 数
+- `--ack-timeout`：ACK 等待超时
+- `--max-retries`：单事件最大重试次数
+- `--send-workers`：发送并发 worker 数
 - `--enable-resume`：是否启用断点续传
-- `--metrics-interval`：指标日志输出周期
+- `--metrics-interval`：指标输出周期
 
-### 过滤
+### 排除规则
 
 - `--exclude <glob>`（可重复）
 
 ---
 
-## `.nosync` 目录冻结
+## 6. `.nosync` 使用说明
 
-在接收端或发送端目录内创建 `.nosync`，可冻结该目录子树：
+冻结目录：
 
 ```bash
 touch some/dir/.nosync
 ```
 
-行为：
-
-- **接收端**：跳过该子树的事件应用与 snapshot prune（本地文件不被收敛覆盖）
-- **发送端**：跳过该子树发送（降低无效流量）
-
-恢复同步：
+恢复目录同步：
 
 ```bash
 rm some/dir/.nosync
 ```
 
-> 升级提示：旧标记 `.stop` 已更名为 `.nosync`。
+推荐用于：
+
+- 本地临时调试目录
+- 大量短期实验数据目录
+- 你不希望被自动收敛覆盖的子目录
 
 ---
 
-## 后台运行
+## 7. 后台运行
 
-```bash
-workspace-sync ... start
-workspace-sync status
-workspace-sync stop
-```
+- `start`：后台启动
+- `status`：查看状态
+- `stop`：停止进程
 
-默认日志（Linux）：
+默认日志位置（Linux）：
 
 - `~/.cache/workspace-sync/workspace-sync.log`
-
----
-
-## 发布
-
-推送 tag 可触发自动发布（仓库启用 release workflow 时）：
-
-```bash
-git tag v0.3.0
-git push origin v0.3.0
-```
