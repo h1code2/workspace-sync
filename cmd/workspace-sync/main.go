@@ -237,7 +237,7 @@ func normalizePeer(peer, listen string) string {
 	return net.JoinHostPort(peer, port)
 }
 
-func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, enableResume bool, partialTTL time.Duration, conflictPolicy string) []string {
+func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.Duration, excludes []string, pidFile string, chunkSize int, ackTimeout time.Duration, maxRetries int, sendWorkers int, metricsInterval time.Duration, pingInterval time.Duration, enableResume bool, partialTTL time.Duration, conflictPolicy string) []string {
 	args := []string{
 		"--mode=" + mode,
 		"--dir=" + dir,
@@ -252,6 +252,7 @@ func buildRunArgs(mode, dir, listen, peer, token string, debounce, resync time.D
 		"--max-retries=" + strconv.Itoa(maxRetries),
 		"--send-workers=" + strconv.Itoa(sendWorkers),
 		"--metrics-interval=" + metricsInterval.String(),
+		"--ping-interval=" + pingInterval.String(),
 		"--enable-resume=" + strconv.FormatBool(enableResume),
 		"--partial-ttl=" + partialTTL.String(),
 		"--conflict-policy=" + conflictPolicy,
@@ -303,6 +304,7 @@ func main() {
 	var enableResume bool
 	var partialTTL time.Duration
 	var conflictPolicy string
+	var pingInterval time.Duration
 
 	flag.StringVar(&mode, "mode", "", "send | receive | both")
 	flag.StringVar(&dir, "dir", ".", "Directory to watch/sync")
@@ -323,6 +325,7 @@ func main() {
 	flag.IntVar(&maxRetries, "max-retries", 4, "Max retries for sending an event before failing")
 	flag.IntVar(&sendWorkers, "send-workers", 2, "Concurrent sender workers for file events (send is ordered per connection)")
 	flag.DurationVar(&metricsInterval, "metrics-interval", 30*time.Second, "Metrics log output interval")
+	flag.DurationVar(&pingInterval, "ping-interval", 30*time.Second, "Ping interval to keep connection alive")
 	flag.BoolVar(&enableResume, "enable-resume", true, "Enable resumable chunk transfer")
 	flag.DurationVar(&partialTTL, "partial-ttl", 2*time.Hour, "TTL for stale partial transfer files (0 to disable cleanup)")
 	flag.StringVar(&conflictPolicy, "conflict-policy", "sender-wins", "Conflict policy on receiver: sender-wins|keep-newer")
@@ -384,7 +387,7 @@ func main() {
 			if token == "" {
 				log.Fatal("--token is required")
 			}
-			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, enableResume, partialTTL, conflictPolicy)
+			runArgs := buildRunArgs(mode, dir, listen, peer, token, debounce, resync, excludes, pidFile, chunkSize, ackTimeout, maxRetries, sendWorkers, metricsInterval, pingInterval, enableResume, partialTTL, conflictPolicy)
 			if err := startBackground(pidFile, logFile, logMaxBytes, runArgs); err != nil {
 				log.Fatal(err)
 			}
@@ -412,6 +415,7 @@ func main() {
 		MaxRetries:      maxRetries,
 		SendWorkers:     sendWorkers,
 		MetricsInterval: metricsInterval,
+		PingInterval:    pingInterval,
 		EnableResume:    enableResume,
 		PartialTTL:      partialTTL,
 		ConflictPolicy:  strings.TrimSpace(conflictPolicy),

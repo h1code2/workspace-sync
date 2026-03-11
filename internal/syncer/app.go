@@ -299,7 +299,12 @@ func (a *App) handleConn(ctx context.Context, conn net.Conn) {
 		atomic.AddInt64(&a.metrics.recvEvents, 1)
 
 		if evt.Type == "hello" {
-			ack := fileEvent{Type: "ack", EventID: evt.EventID, Protocol: 2, Caps: []string{"ack", "chunk", "resume", "move", "stop", "metrics"}}
+			ack := fileEvent{Type: "ack", EventID: evt.EventID, Protocol: 2, Caps: []string{"ack", "chunk", "resume", "move", "stop", "metrics", "ping"}}
+			_ = a.writeEvent(bw, ack)
+			continue
+		}
+		if evt.Type == "ping" {
+			ack := fileEvent{Type: "ack", EventID: evt.EventID}
 			_ = a.writeEvent(bw, ack)
 			continue
 		}
@@ -383,6 +388,12 @@ func (a *App) applyEvent(evt fileEvent) (applyResult, error) {
 	slashRel := rel
 	switch evt.Type {
 	case "snapshot_keep":
+		if _, err := os.Stat(full); err != nil {
+			if os.IsNotExist(err) {
+				return applyResult{}, fmt.Errorf("missing_local")
+			}
+			return applyResult{}, err
+		}
 		a.snapshotMarkSeen(evt.Snapshot, slashRel)
 		return applyResult{}, nil
 	case "mkdir":
@@ -807,6 +818,8 @@ func (a *App) runSender(ctx context.Context) error {
 		resyncCh = resyncTicker.C
 		defer resyncTicker.Stop()
 	}
+	pingTicker := time.NewTicker(a.cfg.PingInterval)
+	defer pingTicker.Stop()
 
 	for {
 		select {
@@ -851,6 +864,10 @@ func (a *App) runSender(ctx context.Context) error {
 		case <-resyncCh:
 			if err := a.initialSync(ctx); err != nil {
 				logf("periodic resync failed: %v\n", err)
+			}
+		case <-pingTicker.C:
+			if err := a.sendPing(ctx); err != nil {
+				logf("ping failed: %v\n", err)
 			}
 		}
 	}
@@ -994,6 +1011,11 @@ func (a *App) sendMkdir(ctx context.Context, rel string) error {
 	return err
 }
 
+func (a *App) sendPing(ctx context.Context) error {
+	_, err := a.sendEvent(ctx, fileEvent{Type: "ping"})
+	return err
+}
+
 func (a *App) sendFileUpsert(ctx context.Context, rel, full string, st os.FileInfo, snapshot string) (fileFingerprint, error) {
 	f, err := os.Open(full)
 	if err != nil {
@@ -1052,7 +1074,7 @@ func (a *App) sendEvent(ctx context.Context, evt fileEvent) (fileEvent, error) {
 		ack, err := a.sendPacketAndWaitAck(ctx, packet, evt.EventID)
 		if err == nil {
 			atomic.AddInt64(&a.metrics.sentEvents, 1)
-			if evt.Type != "upsert_chunk" {
+			if evt.Type != "upsert_chunk" && evt.Type != "ping" {
 				if evt.Path != "" {
 					logf("-> %s %s\n", evt.Type, evt.Path)
 				}
@@ -1117,7 +1139,7 @@ func (a *App) ensureSenderConn(ctx context.Context) error {
 	a.senderW = bufio.NewWriterSize(conn, 256*1024)
 	a.senderR = bufio.NewReaderSize(conn, 256*1024)
 
-	hello := fileEvent{Type: "hello", EventID: newEventID(), Protocol: 2, Caps: []string{"ack", "chunk", "resume", "move", "stop", "metrics"}}
+	hello := fileEvent{Type: "hello", EventID: newEventID(), Protocol: 2, Caps: []string{"ack", "chunk", "resume", "move", "stop", "metrics", "ping"}}
 	packet, err := encrypt(a.cfg.Token, hello)
 	if err != nil {
 		a.closeSenderConn()

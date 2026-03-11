@@ -21,7 +21,7 @@ type wireMessage struct {
 }
 
 type fileEvent struct {
-	Type       string   `json:"type"` // hello|ack|upsert|delete|snapshot_begin|snapshot_end|upsert_begin|upsert_chunk|upsert_end|mkdir|snapshot_keep|move
+	Type       string   `json:"type"` // hello|ack|ping|upsert|delete|snapshot_begin|snapshot_end|upsert_begin|upsert_chunk|upsert_end|mkdir|snapshot_keep|move
 	EventID    string   `json:"event_id,omitempty"`
 	Protocol   int      `json:"protocol,omitempty"`
 	Caps       []string `json:"caps,omitempty"`
@@ -130,7 +130,7 @@ func decrypt(token string, packet []byte) (fileEvent, error) {
 		return fileEvent{}, err
 	}
 	switch evt.Type {
-	case "hello", "ack":
+	case "hello", "ack", "ping":
 		if evt.EventID == "" {
 			return fileEvent{}, errors.New("empty event id")
 		}

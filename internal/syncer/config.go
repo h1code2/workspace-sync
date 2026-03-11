@@ -24,6 +24,7 @@ type Config struct {
 	EnableResume    bool
 	PartialTTL      time.Duration
 	ConflictPolicy  string
+	PingInterval    time.Duration
 }
 
 func (c Config) Validate() error {
@@ -75,6 +76,9 @@ func (c Config) Validate() error {
 	}
 	if c.PartialTTL < 0 {
 		return fmt.Errorf("--partial-ttl must be >= 0")
+	}
+	if c.PingInterval <= 0 {
+		return fmt.Errorf("--ping-interval must be > 0")
 	}
 	switch c.ConflictPolicy {
 	case "", "sender-wins", "keep-newer":
