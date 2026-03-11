@@ -804,8 +804,18 @@ func (a *App) runSender(ctx context.Context) error {
 	}
 	logf("watching %s\n", a.cfg.Dir)
 
-	if err := a.initialSync(ctx); err != nil {
-		return fmt.Errorf("initial sync failed: %w", err)
+	for {
+		if err := a.initialSync(ctx); err != nil {
+			logf("initial sync failed: %v\n", err)
+			select {
+			case <-ctx.Done():
+				a.senderCloseOnce.Do(func() { close(a.senderQueue) })
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		break
 	}
 
 	q := map[string]pendingEvent{}
@@ -1233,6 +1243,13 @@ func (a *App) initialSync(ctx context.Context) error {
 		if prev, ok := a.lastIndex[rel]; ok && prev.Size == st.Size() && prev.ModTime == st.ModTime().UnixMilli() {
 			newIndex[rel] = prev
 			if _, err := a.sendEvent(ctx, fileEvent{Type: "snapshot_keep", Snapshot: snapID, Path: rel}); err != nil {
+				if strings.Contains(err.Error(), "missing_local") {
+					if _, sendErr := a.sendFileUpsert(ctx, rel, path, st, snapID); sendErr != nil {
+						return sendErr
+					}
+					atomic.AddInt64(&a.metrics.snapshotSent, 1)
+					return nil
+				}
 				return err
 			}
 			atomic.AddInt64(&a.metrics.snapshotKept, 1)
@@ -1247,6 +1264,13 @@ func (a *App) initialSync(ctx context.Context) error {
 
 		if prev, ok := a.lastIndex[rel]; ok && prev.Hash != "" && prev.Hash == fp.Hash {
 			if _, err := a.sendEvent(ctx, fileEvent{Type: "snapshot_keep", Snapshot: snapID, Path: rel}); err != nil {
+				if strings.Contains(err.Error(), "missing_local") {
+					if _, sendErr := a.sendFileUpsert(ctx, rel, path, st, snapID); sendErr != nil {
+						return sendErr
+					}
+					atomic.AddInt64(&a.metrics.snapshotSent, 1)
+					return nil
+				}
 				return err
 			}
 			atomic.AddInt64(&a.metrics.snapshotKept, 1)
